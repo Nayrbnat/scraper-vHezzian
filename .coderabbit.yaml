@@ -1,0 +1,49 @@
+# CodeRabbit configuration — AI PR reviewer (a SECOND reviewer that AUGMENTS, never replaces,
+# the adversarial `reviewer` agent in .claude/agents/). It reviews PR diffs and may suggest tests;
+# it does NOT run our test suite (that is pytest in CI). See GitHub.md §5 and §8.
+# Schema: https://docs.coderabbit.ai/reference/yaml-template
+language: en-US
+
+reviews:
+  profile: assertive            # surface real issues; don't pad with agreement
+  request_changes_workflow: true
+  high_level_summary: true
+  poem: false
+  review_status: true
+  auto_review:
+    enabled: true
+    drafts: false               # only review non-draft PRs (drafts are WIP)
+  # Skip generated / non-source paths.
+  path_filters:
+    - "!**/migrations/**"
+    - "!**/*.lock"
+    - "!**/output/**"
+    - "!**/*.jsonl"
+  # Enforce ScrapeForge conventions (mirrors CLAUDE.md + SPEC.md invariants).
+  path_instructions:
+    - path: "scrapers/**"
+      instructions: >-
+        Scrapers must self-register via @register_scraper from core/registry.py and live one-per-file.
+        Flag any edit to core/engine.py, a central DOMAIN_REGISTRY, root cli.py, or the core Settings
+        class to add a scraper (Invariant #16). Flag editing another feature's folder (Invariant #17).
+    - path: "core/**"
+      instructions: >-
+        All driver/bridge/scraper/engine I/O must be async. Flag sync_api imports, asyncio.run() inside
+        a running loop, and blocking I/O on the event loop (use asyncio.to_thread for sync libs).
+        Enforce fingerprint coherence (Invariant #11): one BrowserProfile + proxy per handoff chain;
+        curl_cffi impersonate target aligned to the installed Chrome major.
+    - path: "api/**"
+      instructions: >-
+        The serving API is read + enqueue ONLY — it must never drive a browser directly (Invariant #18).
+        All data endpoints require API-key auth. Flag any direct ScrapeEngine/browser call from a route.
+    - path: "auth/**"
+      instructions: >-
+        No plaintext credentials or cookies — all session state goes through StateStore (Fernet).
+        No scripting SSO password entry in headless mode. Flag any plaintext-at-rest path.
+    - path: "tests/**"
+      instructions: >-
+        Tests should exercise real behavior, not mock the unit under test. Verify soft-block and resume
+        paths are covered. Flag tests that only assert mocks were called.
+
+chat:
+  auto_reply: true

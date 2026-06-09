@@ -1,0 +1,6 @@
+# Automatic HTTPS (Let's Encrypt) in front of the serving API.
+# {$API_DOMAIN} comes from the environment (set in ../.env).
+{$API_DOMAIN} {
+	encode gzip
+	reverse_proxy api:8000
+}

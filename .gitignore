@@ -1,0 +1,45 @@
+# === Secrets & runtime state (NEVER commit) ===
+.env
+.env.*
+!.env.example
+proxies.txt
+.states/
+**/states/
+*.enc
+.scrapeforge/
+output/
+*.jsonl
+*.manifest
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.python-version
+
+# === Tooling caches ===
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# === Worktrees (kept outside the tree, but ignore if created here) ===
+worktrees/
+wt-*/
+
+# === Editor / OS ===
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# === Logs / debug artifacts ===
+*.log
+screenshots/
+debug/

@@ -1,0 +1,25 @@
+# Serving plane — slim, NO browser. Read + enqueue API only.
+FROM python:3.12-slim AS base
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /app
+
+# Install deps first for layer caching. The API does not need the heavy driver/browser extras,
+# but the package declares them as core deps; they are pure-python wheels except the browsers,
+# which are not invoked here.
+COPY pyproject.toml README.md ./
+COPY scrapeforge ./scrapeforge
+RUN pip install --upgrade pip && pip install .
+
+# Drop privileges.
+RUN useradd --create-home --uid 10001 appuser
+USER appuser
+
+EXPOSE 8000
+
+# uvicorn serves the FastAPI app factory. The API is stateless — scale horizontally.
+CMD ["uvicorn", "scrapeforge.api.app:create_app", "--factory", \
+     "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]

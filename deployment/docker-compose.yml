@@ -1,0 +1,117 @@
+# ScrapeForge — single-VPS deployment (ingestion + serving planes on one host).
+# Bring up:  docker compose --env-file ../.env up -d --build
+# Scale ingestion:  docker compose up -d --scale worker=3
+#
+# Secrets come from ../.env (NEVER committed). See DEPLOYMENT.md for the full runbook.
+
+name: scrapeforge
+
+x-app-env: &app-env
+  DATABASE_URL: postgresql+asyncpg://scrapeforge:${POSTGRES_PASSWORD:?set in .env}@postgres:5432/scrapeforge
+  REDIS_URL: redis://redis:6379/0
+  STATE_STORE_KEY: ${STATE_STORE_KEY:?set in .env}
+  STATE_STORE_PATH: /data/states
+  PROXY_LIST_PATH: /data/proxies.txt
+  NODRIVER_SERVICE_URL: http://nodriver:8081
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  LOG_FORMAT: json
+
+services:
+  # --- Serving plane (light, stateless): read + enqueue API. Never drives a browser. ---
+  api:
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile.api
+    environment:
+      <<: *app-env
+      API_KEYS: ${API_KEYS:?comma-separated keys in .env}
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_started }
+    expose:
+      - "8000"
+    restart: unless-stopped
+
+  # --- Ingestion plane (heavy): consumes jobs, drives browsers, writes to Postgres. ---
+  worker:
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile.worker
+    command: ["arq", "worker.main.WorkerSettings"]
+    environment: *app-env
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_started }
+      nodriver: { condition: service_started }
+    volumes:
+      - state-data:/data          # encrypted session states + proxies.txt (mounted, not baked)
+    shm_size: "1gb"               # Chrome needs shared memory headroom
+    restart: unless-stopped
+
+  # --- Scheduler: enqueues recurring scrapes per configured sources ("continuously populate"). ---
+  scheduler:
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile.worker
+    command: ["arq", "worker.scheduler.SchedulerSettings"]
+    environment: *app-env
+    depends_on:
+      redis: { condition: service_started }
+    restart: unless-stopped
+
+  # --- AGPL-isolated nodriver service (separate process boundary; never imported into the app). ---
+  nodriver:
+    build:
+      context: ../services/nodriver_service
+      dockerfile: Dockerfile
+    expose:
+      - "8081"
+    shm_size: "1gb"
+    restart: unless-stopped
+
+  # --- Shared datastore: Postgres with pgvector (for future semantic search). ---
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: scrapeforge
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
+      POSTGRES_DB: scrapeforge
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U scrapeforge"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # --- Job queue. ---
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+
+  # --- Reverse proxy + automatic HTTPS in front of the API. ---
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      API_DOMAIN: ${API_DOMAIN:?your public hostname in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - api
+    restart: unless-stopped
+
+volumes:
+  pg-data:
+  redis-data:
+  state-data:
+  caddy-data:
+  caddy-config:
