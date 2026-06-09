@@ -151,6 +151,27 @@ Why it's built this way (and the failure modes it avoids):
   `🤖 Generated with [Claude Code](https://claude.com/claude-code)`
 - Use `gh pr create`, `gh pr view`, `gh pr checks`; never push straight to `main`.
 
+### 6.1 Auto-commit cadence (standing policy)
+
+Agents **commit automatically after each completed unit of work** — a finished module, a passing test
+file, a doc update — without waiting to be asked. Each commit is small, Conventional-Commit-titled, and
+carries the `Co-Authored-By` footer. Don't batch a day's work into one giant commit; commit at natural
+checkpoints so history is reviewable and `/compact`-safe.
+
+**Push target is always a branch, never `main`:**
+
+```
+work → auto-commit (small) → push to feat/<slug> → open/refresh PR → review → squash-merge to main
+```
+
+- **`main` is never pushed to directly.** It advances **only** through merged PRs (a server-side merge,
+  not a `git push origin main`). Branch protection enforces this.
+- Push the feature branch early and often (`git push -u origin feat/<slug>`); the PR updates itself as
+  you add commits. Use a **draft PR** while WIP, mark ready when the Definition of Done (§7) is met.
+- The repository's very first `main` is an **empty initialization commit** (the PR base). Everything of
+  substance — including the initial scaffold — reaches `main` through its PR, so no real work is ever
+  pushed to `main` directly.
+
 ---
 
 ## 7. Merge / integration protocol
