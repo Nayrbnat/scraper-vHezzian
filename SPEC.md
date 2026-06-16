@@ -16,6 +16,7 @@ ScrapeEngine (singleton orchestrator)
 ├── ScraperRegistry (core/registry.py) — @register_scraper decorator; get_scraper_for(domain)
 │       scrapers self-register on import; NO central DOMAIN_REGISTRY dict (Invariant #16)
 ├── RateLimiter — proactive per-domain politeness (async acquire)
+├── CircuitBreaker (core/circuit_breaker.py) — reactive per-domain pause policy (allow/record)
 ├── FingerprintManager — installed-Chrome-derived profiles (coherence)
 ├── ArticleSink — JsonlSink (local/CLI) | PostgresSink (server); dedup + resume behind one seam
 ├── ProxyRotator — manages proxy lifecycle
@@ -128,6 +129,7 @@ class ProxySession:
 from dataclasses import dataclass, field
 from typing import Optional
 from datetime import datetime, timezone
+
 
 @dataclass(slots=True)
 class StorageState:
@@ -576,9 +578,12 @@ class BaseScraper(ABC):
         ...
 
     def _extract_article(self, html: str, url: str) -> Article:
-        # Helper: parse HTML into Article. Uses selectolax (lxml fallback).
-        # Subclasses override _get_selectors() for domain-specific CSS.
-        # Raises ChallengeError if validators.response_is_valid() fails (soft-block).
+        # Thin coordinator — owns NO parsing logic itself (SRP):
+        #   1. utils.validators.response_is_valid(html, selectors) -> raise ChallengeError if soft-block.
+        #   2. utils.parsers.extract(html, self._get_selectors()) -> field dict (DOM work lives there).
+        #   3. Assemble the Article (a core data structure, SPEC §2.1) from those fields.
+        # Subclasses override _get_selectors() for domain-specific CSS; they do not re-implement parsing.
+        # Boundary: parsers = pure DOM->fields; validators = soft-block; base = coordinate + assemble.
         ...
 
     def _get_selectors(self) -> dict:
@@ -590,7 +595,7 @@ class BaseScraper(ABC):
 ---
 
 ### 3.8 `PremiumScraper` (Bucket 1 Base)
-**File:** `scrapers/bucket1_premium.py`
+**File:** `scrapers/premium/_base.py`
 
 ```python
 class PremiumScraper(BaseScraper):
@@ -648,7 +653,7 @@ class PremiumScraper(BaseScraper):
 ---
 
 ### 3.9 `CommunityScraper` (Bucket 2 Base)
-**File:** `scrapers/bucket2_community.py`
+**File:** `scrapers/community/_base.py`
 
 ```python
 class CommunityScraper(BaseScraper):
@@ -692,7 +697,7 @@ class CommunityScraper(BaseScraper):
 ---
 
 ### 3.10 `PublicScraper` (Bucket 3)
-**File:** `scrapers/bucket3_public.py`
+**File:** `scrapers/public/public.py`
 
 ```python
 class PublicScraper(BaseScraper):
@@ -999,7 +1004,9 @@ class ScrapeEngine:
     # Invariants:
     # - Singleton per process.
     # - Routing is via core.registry.get_scraper_for(domain) — NOT a central dict on the engine.
-    # - Circuit breaker: if a domain fails 5 times in 10 min, pause for 30 min.
+    # - The engine owns NO resilience state itself: proactive politeness is delegated to RateLimiter
+    #   and the reactive circuit-breaker policy to CircuitBreaker (symmetric collaborators). The engine
+    #   only coordinates them — route -> gate -> run -> persist (one level of abstraction).
 
     def __init__(self, sink: Optional['ArticleSink'] = None) -> None:
         discover_scrapers()  # import scraper modules so @register_scraper runs
@@ -1007,21 +1014,22 @@ class ScrapeEngine:
         self.auth_manager = AuthManager()
         self.fingerprint_manager = FingerprintManager()
         self.rate_limiter = RateLimiter()         # proactive per-domain politeness
+        self.circuit_breaker = CircuitBreaker()   # reactive per-domain pause policy (see §3.19a)
         self.sink = sink                          # optional ArticleSink (e.g. JsonlSink)
-        self._circuit_breakers: dict[str, dict] = {}  # domain -> {failures, last_failure, paused_until}
 
     async def scrape(self, url: str) -> ScrapeResult:
         # Main entry point.
         # Flow:
         # 1. Parse domain from URL.
-        # 2. Check circuit breaker (reactive).
+        # 2. if not self.circuit_breaker.allow(domain): short-circuit (domain is paused).
         # 3. await self.rate_limiter.acquire(domain)  (proactive politeness)
         # 4. cls = core.registry.get_scraper_for(domain).
         # 5. If None, use PublicScraper (catch-all).
         # 6. Assign proxy from rotator (await get_healthy_proxy()).
         # 7. Instantiate scraper with bridge + proxy.
         # 8. await scraper.scrape(url).
-        # 9. Update circuit breaker on failure; on success, await self.sink.write(result) if sink set.
+        # 9. self.circuit_breaker.record(domain, success); on success, await self.sink.write(result)
+        #    if sink set.
         # 10. Return result.
         ...
 
@@ -1032,24 +1040,26 @@ class ScrapeEngine:
     # NOTE: no register_scraper() method on the engine — registration is decorator-driven
     # via core.registry.register_scraper at import time (Invariant #16). For dynamic/runtime
     # registration (rare), call core.registry.register_scraper(...) directly.
-
-    def _check_circuit_breaker(self, domain: str) -> bool:
-        # Return True if domain is currently paused.
-        ...
-
-    def _update_circuit_breaker(self, domain: str, success: bool) -> None:
-        # Increment failure count or reset on success.
-        ...
+    #
+    # NOTE: the circuit-breaker state and policy live in core/circuit_breaker.py (§3.19a), NOT here.
+    # The engine holds a CircuitBreaker instance and calls allow()/record() — no private CB methods.
 ```
 
 ---
 
-### 3.18 `ArticleSink` / `JsonlSink` (Storage Layer)
-**File:** `core/storage.py`
+### 3.18 `ArticleSink` / `JsonlSink` / `PostgresSink` (Storage Layer)
+**Package:** `core/storage/` — the seam and its backends are **separate files** so a CLI-only run never
+imports the DB stack (and vice-versa). SRP: the interface, the file backend, and the DB backend are
+three responsibilities at two abstraction levels.
+- `core/storage/base.py` — `ArticleSink` ABC + the shared `url_id()` helper (below).
+- `core/storage/jsonl.py` — `JsonlSink` (file I/O + resume manifest; local/CLI).
+- `core/storage/postgres.py` — `PostgresSink` (async UPSERT via `core/db/`; serving plane).
+
 **Responsibility:** Persist results in a RAG-ready, deduplicated, resumable way. Output is the
 boundary to the downstream LLM/RAG pipeline.
 
 ```python
+# core/storage/base.py
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Optional
@@ -1073,6 +1083,7 @@ class ArticleSink(ABC):
     @abstractmethod
     async def close(self) -> None: ...
 
+# core/storage/jsonl.py
 class JsonlSink(ArticleSink):
     # Append-only JSONL writer (one article per line) + sidecar resume manifest.
     #
@@ -1113,6 +1124,7 @@ class JsonlSink(ArticleSink):
 **Used by:** `cli.py` (constructs from `--output`), `ScrapeEngine`, `BaseScraper.batch_scrape`.
 
 ```python
+# core/storage/postgres.py
 class PostgresSink(ArticleSink):
     # Production sink for the serving plane — same ArticleSink interface as JsonlSink, so the
     # engine/scrapers stay storage-agnostic. JsonlSink remains for local/CLI runs.
@@ -1171,6 +1183,43 @@ class RateLimiter:
 
 ---
 
+### 3.19a `CircuitBreaker`
+**File:** `core/circuit_breaker.py`
+**Responsibility:** Reactive per-domain failure policy — pause a domain after repeated failures so the
+engine stops hammering a target that is blocking us. Extracted from `ScrapeEngine` (which only
+coordinates it) so the resilience policy + its state live in one place, symmetric with `RateLimiter`
+(proactive). SRP: the engine routes; the breaker decides when a domain is too hot to touch.
+
+```python
+class CircuitBreaker:
+    # Per-domain trip policy. Owns ALL breaker state; the engine never reaches inside it.
+    #
+    # Invariants:
+    # - allow(domain) is False while a domain is paused; True otherwise.
+    # - Trip rule: >= CIRCUIT_BREAKER_FAILURE_THRESHOLD failures within the failure window
+    #   pauses the domain for CIRCUIT_BREAKER_PAUSE_MINUTES (defaults from Settings; e.g. 5 fails
+    #   in 10 min -> pause 30 min).
+    # - record(domain, success=True) resets the failure count; success after a pause closes the breaker.
+
+    def __init__(self, threshold: int = 5, pause_minutes: int = 30) -> None:
+        # domain -> {failures, last_failure, paused_until}
+        self._state: dict[str, dict] = {}
+        self._threshold = threshold
+        self._pause_minutes = pause_minutes
+
+    def allow(self, domain: str) -> bool:
+        # Return True if the domain is not currently paused (and lazily clear an expired pause).
+        ...
+
+    def record(self, domain: str, success: bool) -> None:
+        # On success: reset the domain's failure count. On failure: increment and trip if over threshold.
+        ...
+```
+
+**Owned by:** `ScrapeEngine` (singleton). `allow()` is checked before dispatch; `record()` after.
+
+---
+
 ### 3.20 Response Validators (Soft-Block Detection)
 **File:** `utils/validators.py`
 **Responsibility:** Catch HTTP-200 decoy/honeypot pages that anti-bot systems serve instead of a 403.
@@ -1186,7 +1235,8 @@ def response_is_valid(html: str, selectors: dict, min_content_len: int = 500) ->
     ...
 ```
 
-**Used by:** every bucket scraper (after `_extract_article`), `FingerprintManager` tests.
+**Used by:** every bucket scraper (inside `_extract_article`). **Scope: response/soft-block only** —
+JA4/TLS validation is NOT here; it lives on `FingerprintManager.validate_ja4()` (§3.15).
 
 ---
 
@@ -1348,66 +1398,63 @@ class DelayEngine:
 > root mounts registered sub-apps via discovery (`app.add_typer(sub_app, name=...)`). Adding a command =
 > adding a file in your folder, not editing the root `cli.py`. The commands below are the *core* set.
 
-### 5.1 `cli.py` — Typer App Structure
+### 5.1 `cli.py` — Thin Root (composer + global commands ONLY)
+
+The root owns **only** cross-cutting/global commands and the sub-app mounting. Per-bucket commands
+(`scrape_public`, `scrape_community`, `scrape_premium`, `login`) live in their bucket's sub-app file
+(`scrapers/<bucket>/cli.py`) — adding/changing one is a new file in your folder, never an edit here.
 
 ```python
+# cli.py — root composer
 import typer
 
 app = typer.Typer(name='scrapeforge', help='Multi-bucket anti-detection scraper')
-# Per-feature sub-apps are auto-mounted at startup (one app.add_typer per registered bucket);
-# features add their own sub-app file rather than editing this module.
 
-@app.command()
-def scrape_public(
-    source: str = typer.Argument(..., help='URL or domain to scrape'),
-    output: Path = typer.Option(Path('./output'), '--output', '-o'),
-    limit: int = typer.Option(100, '--limit', '-l'),
-    proxy: Optional[str] = typer.Option(None, '--proxy'),
-):
-    # Scrape public news outlets (Bucket 3).
+def _mount_subapps() -> None:
+    # Discover per-bucket Typer sub-apps and mount them (one app.add_typer each), e.g.:
+    #   from scrapers.community.cli import community_app
+    #   app.add_typer(community_app, name='community')
+    # Done via discovery so features self-register their commands without editing this file.
     ...
 
-@app.command()
-def scrape_community(
-    platform: str = typer.Argument(..., help='reddit | substack | wso'),
-    target: str = typer.Argument(..., help='subreddit name, newsletter domain, or WSO forum URL'),
-    limit: int = typer.Option(100, '--limit', '-l'),
-    output: Path = typer.Option(Path('./output'), '--output', '-o'),
-):
-    # Scrape community/foreign sites (Bucket 2).
-    ...
+_mount_subapps()
 
-@app.command()
-def login(
-    site: str = typer.Argument(..., help='Domain to log into (e.g., ft.com)'),
-    interactive: bool = typer.Option(True, '--interactive/--headless'),
-    vnc: bool = typer.Option(False, '--vnc', help='Use Camoufox VNC server'),
-):
-    # Interactive login for premium sites (Bucket 1).
-    ...
-
-@app.command()
-def scrape_premium(
-    site: str = typer.Argument(..., help='Domain (e.g., ft.com)'),
-    url: Optional[str] = typer.Option(None, '--url'),
-    batch_file: Optional[Path] = typer.Option(None, '--batch-file'),
-    output: Path = typer.Option(Path('./output'), '--output', '-o'),
-):
-    # Scrape premium paywalled articles using stored session.
-    ...
+# --- Global commands only (not bucket-specific) ---
 
 @app.command()
 def verify_fingerprint(
     driver: str = typer.Option('curl_cffi', '--driver'),
     proxy: Optional[str] = typer.Option(None, '--proxy'),
 ):
-    # Verify your outbound TLS fingerprint matches claimed browser.
+    # Verify your outbound TLS fingerprint matches the claimed browser.
     ...
 
 @app.command()
 def list_sessions():
     # List all stored authenticated sessions.
     ...
+```
+
+### 5.2 Per-bucket sub-app (the pattern every bucket follows)
+
+```python
+# scrapers/community/cli.py — owned by the community bucket; root never edited to add this
+import typer
+
+community_app = typer.Typer(help='Community/foreign sites (Bucket 2)')
+
+@community_app.command('scrape')
+def scrape_community(
+    platform: str = typer.Argument(..., help='reddit | substack | wso'),
+    target: str = typer.Argument(..., help='subreddit, newsletter domain, or WSO forum URL'),
+    limit: int = typer.Option(100, '--limit', '-l'),
+    output: Path = typer.Option(Path('./output'), '--output', '-o'),
+):
+    # Scrape community/foreign sites (Bucket 2).
+    ...
+
+# premium (scrape_premium + login) and public (scrape_public) follow the same shape in
+# scrapers/premium/cli.py and scrapers/public/cli.py respectively.
 ```
 
 ---
@@ -1531,13 +1578,10 @@ class Settings(BaseSettings):
     HUMANIZE_TYPING_MEAN_MS: float = 80.0
     HUMANIZE_TYPING_STD_MS: float = 20.0
 
-    # Bucket-specific
-    REDDIT_USE_JSON_API: bool = True
-    REDDIT_JSON_LIMIT: int = 100
-    SUBSTACK_USE_CURL_CFFI: bool = True
-    PUBLIC_MAX_CONCURRENCY: int = 5
-    PREMIUM_MAX_CONCURRENCY: int = 1
-    COMMUNITY_MAX_CONCURRENCY: int = 5
+    # NOTE: bucket-specific keys (REDDIT_*, SUBSTACK_*, and each bucket's *_MAX_CONCURRENCY) are
+    # DELIBERATELY NOT here. A key used by exactly one feature belongs in that feature's own
+    # settings fragment (see below), not in this shared class — keeping config/settings.py off the
+    # merge-conflict hot path (Invariant #16). Only genuinely shared keys live in Settings.
 
     # Circuit breaker
     CIRCUIT_BREAKER_FAILURE_THRESHOLD: int = 5
@@ -1560,6 +1604,25 @@ class Settings(BaseSettings):
     LOG_FORMAT: Literal['text', 'json'] = 'text'
 
     model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8')
+```
+
+**Per-module fragment (the pattern for every feature-specific key).** Each feature defines its own
+`BaseSettings` fragment in its own module, reading the same `.env`. Adding a feature's config is a new
+class in your folder — never an edit to the shared `Settings` above.
+
+```python
+# scrapers/community/reddit.py
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+class RedditSettings(BaseSettings):
+    REDDIT_USE_JSON_API: bool = True
+    REDDIT_JSON_LIMIT: int = 100
+    COMMUNITY_MAX_CONCURRENCY: int = 5            # this bucket's concurrency floor
+    model_config = SettingsConfigDict(env_file='.env', env_file_encoding='utf-8')
+
+# Likewise: SubstackSettings (SUBSTACK_USE_CURL_CFFI) in scrapers/community/substack.py,
+# PremiumSettings (PREMIUM_MAX_CONCURRENCY) in scrapers/premium/_base.py,
+# PublicSettings (PUBLIC_MAX_CONCURRENCY) in scrapers/public/public.py.
 ```
 
 ---

@@ -77,8 +77,8 @@
 - [ ] Implement `random_delay(min, max)` with jitter.
 - [ ] **Test:** Unit test path generation (assert non-linear), delay distribution (assert within bounds).
 
-### 1.7 Storage / Output Sink (`core/storage.py`)
-- [ ] Implement `ArticleSink` ABC (`async write`, `seen`, `async close`) and `JsonlSink`.
+### 1.7 Storage / Output Sink (`core/storage/`)
+- [ ] Implement `ArticleSink` ABC (`async write`, `seen`, `async close`) in `core/storage/base.py` and `JsonlSink` in `core/storage/jsonl.py`.
 - [ ] RAG-ready JSONL: one flattened article per line with stable `id = sha256(url)`.
 - [ ] Content-hash dedup (skip re-writes of identical normalized content).
 - [ ] Resume manifest: load `<output>.manifest` on init; append url-hash after each write.
@@ -279,8 +279,8 @@ Only after this passes do we build the full proxy/humanize/escalation stack agai
 - [ ] Implement retry logic with exponential backoff and **bounded** driver escalation (terminal `ChallengeError` / re-login prompt when the last rung fails — no infinite escalation).
 - [ ] Call `RateLimiter.acquire(domain)` before every dispatch (proactive politeness).
 - [ ] Wire the optional `ArticleSink`: `sink.seen()` to skip completed URLs, `await sink.write(result)` on success.
-- [ ] Add circuit breaker: if a site fails 5 times in 10 minutes, pause scrapes for 30 minutes.
-- [ ] **Test:** Unit test routing logic, retry logic, circuit breaker, rate-limit gating, sink wiring.
+- [ ] Implement `CircuitBreaker` as its own module (`core/circuit_breaker.py`, symmetric with `RateLimiter`): if a site fails 5 times in 10 minutes, pause scrapes for 30 minutes. The engine owns an instance and calls `allow()`/`record()` — no breaker state inlined in the engine.
+- [ ] **Test:** Unit-test engine routing/retry/sink-wiring and `CircuitBreaker` (trip + reset) separately; verify rate-limit gating.
 
 ### 5.2 Performance Tuning
 - [ ] Profile `curl_cffi` batch scraping. Tune the per-domain bridge-pool size (default 5, allow override).
@@ -329,7 +329,7 @@ Only after this passes do we build the full proxy/humanize/escalation stack agai
 - [ ] Alembic init + first migration under `migrations/`.
 - [ ] **Test (`test_db_models.py` `@db`):** schema round-trip, PK dedup, job status transitions.
 
-### 6.2 `PostgresSink` (`core/storage.py`)
+### 6.2 `PostgresSink` (`core/storage/postgres.py`)
 - [ ] Implement `PostgresSink(ArticleSink)` — UPSERT by id (dedup), `seen()` = DB existence (resume).
 - [ ] Engine/scrapers stay storage-agnostic; `JsonlSink` remains for local/CLI.
 - [ ] **Test (`test_postgres_sink.py` `@db`):** upsert dedup, `seen()`, ArticleSink-contract parity.

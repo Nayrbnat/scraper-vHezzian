@@ -10,20 +10,25 @@
 ```
 scrapeforge/
 ├── __init__.py
-├── cli.py                          # Typer CLI: all user-facing commands
+├── cli.py                          # Typer root: thin composer — mounts per-feature sub-apps + global commands
 ├── pyproject.toml                  # Dependencies, build config
 ├── README.md                       # Setup + usage guide
 ├── .env.example                    # Template for secrets & config
 │
 ├── core/                           # === INFRASTRUCTURE LAYER ===
 │   ├── __init__.py
-│   ├── engine.py                   # ScrapeEngine: singleton orchestrator, circuit breaker (routes via registry)
+│   ├── engine.py                   # ScrapeEngine: thin orchestrator — routes via registry, coordinates collaborators
 │   ├── registry.py                 # ScraperRegistry: @register_scraper decorator + get_scraper_for (no central dict)
 │   ├── stealth_bridge.py           # StealthBridge: unified ASYNC driver interface (4 backends)
 │   ├── proxy_rotator.py            # ProxyRotator: health checks, session affinity, geo-targeting
 │   ├── fingerprint_manager.py      # FingerprintManager: JA4/TLS/UA gen + installed-Chrome coherence
 │   ├── rate_limiter.py             # RateLimiter: proactive per-domain politeness (async acquire)
-│   ├── storage.py                  # ArticleSink / JsonlSink / PostgresSink: dedup, resume, RAG-ready
+│   ├── circuit_breaker.py          # CircuitBreaker: reactive per-domain pause policy (owned by Engine)
+│   ├── storage/                    # ArticleSink seam + backends (dedup, resume, RAG-ready)
+│   │   ├── __init__.py
+│   │   ├── base.py                 # ArticleSink ABC + url_id() helper
+│   │   ├── jsonl.py                # JsonlSink: append-only JSONL + resume manifest (local/CLI)
+│   │   └── postgres.py             # PostgresSink: async UPSERT into core/db (serving plane)
 │   ├── drivers/                    # Driver implementations (hidden from scrapers)
 │   │   ├── __init__.py
 │   │   ├── base.py                 # BaseDriver: ABC all drivers inherit
@@ -97,7 +102,7 @@ scrapeforge/
 ├── utils/                          # === UTILITIES ===
 │   ├── __init__.py
 │   ├── humanize.py                 # MousePathGenerator, ScrollSimulator, DelayEngine
-│   ├── validators.py               # JA4 hash validation, response sanity checks
+│   ├── validators.py               # response/soft-block validation only (decoy/honeypot detection)
 │   └── parsers.py                  # DOM extraction helpers (selectolax/BeautifulSoup wrappers)
 │
 ├── config/                         # === CONFIGURATION ===
@@ -124,7 +129,8 @@ scrapeforge/
 │   ├── test_bucket2.py             # Reddit JSON parsing, Substack archive parsing
 │   ├── test_bucket3.py             # Public scraper + hybrid escalation logic
 │   ├── test_humanize.py            # Bezier paths, delay distributions, scroll entropy
-│   ├── test_validators.py          # response_is_valid soft-block detection, JA4 checks
+│   ├── test_validators.py          # response_is_valid soft-block / decoy-page detection
+│   ├── test_fingerprint.py         # FingerprintManager: Chrome-version map, impersonate target, JA4
 │   ├── test_storage.py             # JsonlSink: dedup, resume manifest, crash-safe append
 │   └── test_rate_limiter.py        # per-domain interval enforcement, premium floor
 │
@@ -149,13 +155,14 @@ scrapeforge/
 
 | File | What It Does | Who Uses It | Add/Remove? |
 |------|-------------|-------------|-------------|
-| `core/engine.py` | Routes URLs to scrapers (via registry), manages circuit breakers, retry logic | CLI, batch scripts | **Core — never remove** |
+| `core/engine.py` | Thin orchestrator: routes URLs to scrapers (via registry) and coordinates collaborators (rate limiter, circuit breaker, proxy rotator, sink) | CLI, batch scripts | **Core — never remove** |
 | `core/registry.py` | `@register_scraper` decorator + `get_scraper_for(domain)`; scrapers self-register (conflict-free extension point) | Engine, all scrapers | **Core — never remove** |
 | `core/stealth_bridge.py` | Unified interface over 4 drivers. All scrapers talk here. | All scrapers, SSOHandler | **Core — never remove** |
 | `core/proxy_rotator.py` | Proxy health checks, session affinity, burned-IP cooldown | StealthBridge, Engine | **Core — never remove** |
 | `core/fingerprint_manager.py` | Generates consistent browser profiles, validates JA4, derives curl impersonate target from installed Chrome | StealthBridge, CLI | **Core — never remove** |
 | `core/rate_limiter.py` | Proactive per-domain politeness (async acquire); premium floor | Engine | **Core — never remove** |
-| `core/storage.py` | `ArticleSink`/`JsonlSink`/`PostgresSink`: dedup, resume, RAG-ready output | Engine, scrapers, CLI, workers | **Core — keep** |
+| `core/circuit_breaker.py` | Reactive per-domain pause policy (failure counting, pause windows); `allow()`/`record()` | Engine | **Core — never remove** |
+| `core/storage/` | `ArticleSink` seam (`base.py`) + backends (`jsonl.py`, `postgres.py`): dedup, resume, RAG-ready output | Engine, scrapers, CLI, workers | **Core — keep** |
 | `core/db/` | SQLAlchemy async models (articles/jobs/sources) + session + repositories | API, workers, `PostgresSink` | **Core (serving) — keep** |
 | `api/` | FastAPI serving plane: read + enqueue only; never drives a browser | external clients | **Serving — keep** |
 | `worker/` | arq workers + scheduler: consume jobs → `ScrapeEngine` → `PostgresSink` | queue | **Ingestion — keep** |
@@ -165,7 +172,7 @@ scrapeforge/
 | `core/drivers/primp_driver.py` | Rust HTTP client with OS-specific TLS | StealthBridge | **Optional — remove if unused** |
 | `core/drivers/patchright_driver.py` | Real Chrome via Patchright fork | StealthBridge, SSOHandler | **Core — keep** |
 | `core/drivers/nodriver_driver.py` | Direct CDP over WebSocket | StealthBridge | **Optional — isolate if AGPL concern** |
-| `scrapers/base.py` | ABC: Article dataclass, batch logic, selector extraction | All bucket scrapers | **Core — never remove** |
+| `scrapers/base.py` | ABC: batch orchestration + selector contract; delegates DOM parsing to `utils/parsers.py` (the `Article` dataclass is a core data structure, see `SPEC.md` §2.1 — not owned here) | All bucket scrapers | **Core — never remove** |
 | `scrapers/premium/*.py` | One file per premium site (FT, Bloomberg, WSJ, Economist) | Engine (via registry) | **Remove sites you don't need (delete file)** |
 | `scrapers/community/*.py` | One file per platform (Reddit, Substack, WSO) | Engine (via registry) | **Remove platforms you don't need (delete file)** |
 | `scrapers/public/public.py` | Generic public news scraper (catch-all) | Engine (via registry) | **Core — keep as fallback** |
@@ -173,11 +180,11 @@ scrapeforge/
 | `auth/state_store.py` | Encrypted cookie vault | AuthManager, SSOHandler | **Remove if not scraping Bucket 1** |
 | `auth/sso_handler.py` | Interactive browser login (VNC/headful) | AuthManager, CLI | **Remove if not scraping Bucket 1** |
 | `utils/humanize.py` | Mouse paths, scroll entropy, delays | PatchrightDriver, WSOScraper | **Core — keep** |
-| `utils/validators.py` | JA4 validation, response checks | FingerprintManager, tests | **Core — keep** |
-| `utils/parsers.py` | DOM extraction wrappers | All scrapers | **Core — keep** |
+| `utils/validators.py` | Response/soft-block validation only (decoy/honeypot detection); **no JA4** (that lives on `FingerprintManager`) | All scrapers, tests | **Core — keep** |
+| `utils/parsers.py` | Sole owner of DOM extraction (selectolax/lxml wrappers); used by `BaseScraper._extract_article` | All scrapers | **Core — keep** |
 | `config/settings.py` | Pydantic config, env loading | Everything | **Core — never remove** |
 | `exceptions.py` | Typed exception hierarchy | Everything | **Core — never remove** |
-| `cli.py` | Typer commands for all 3 buckets | User | **Core — keep** |
+| `cli.py` | Thin Typer root: mounts per-feature sub-apps + a few global commands (per-bucket commands live in `scrapers/<bucket>/cli.py`) | User | **Core — keep** |
 
 ---
 
@@ -398,7 +405,7 @@ User runs: scrapeforge scrape-premium --site ft.com --url <article>
     |
     v
 ScrapeEngine.scrape(url)
-    |---> DomainRouter: 'ft.com' -> FTScraper
+    |---> registry.get_scraper_for('ft.com') -> FTScraper
     |---> RateLimiter.acquire('ft.com')  [blocks >= 60s since last premium hit]
     |---> ProxyRotator.get_healthy_proxy() -> ProxySession
     |---> profile = FingerprintManager.generate_profile()  [SHARED across the chain]
@@ -428,7 +435,7 @@ User runs: scrapeforge scrape-community --platform reddit --target wallstreetbet
     |
     v
 ScrapeEngine.scrape('https://www.reddit.com/r/wallstreetbets/.json?limit=100')
-    |---> DomainRouter: 'reddit.com' -> RedditScraper
+    |---> registry.get_scraper_for('reddit.com') -> RedditScraper
     |---> RateLimiter.acquire('reddit.com')
     |---> ProxyRotator.get_healthy_proxy() -> NEW proxy (per-subreddit rotation)
     |---> RedditScraper.scrape_subreddit('wallstreetbets', limit=100)
@@ -450,7 +457,7 @@ User runs: scrapeforge scrape-public --source https://public-news.com/article
     |
     v
 ScrapeEngine.scrape(url)
-    |---> DomainRouter: unmapped domain -> PublicScraper (catch-all)
+    |---> registry.get_scraper_for(domain) -> None (unmapped) -> PublicScraper (catch-all)
     |---> RateLimiter.acquire(domain)
     |---> ProxyRotator.get_healthy_proxy() -> P
     |---> profile = FingerprintManager.generate_profile()  [SHARED across the chain]
@@ -520,6 +527,11 @@ All data endpoints require an `X-API-Key` header (per-key rate-limited). Hosting
 
 ### 8.2 Environment Variables
 
+> These are the **core/shared** keys (read by `config/settings.py`). Feature-specific keys
+> (e.g. `REDDIT_*`, `SUBSTACK_*`, `PREMIUM_*`) live in **per-module settings fragments** inside their
+> own package, not in the core `Settings` class — see `SPEC.md` §8. The runtime env is the union of the
+> core keys below plus whatever fragments are present; it is not one monolithic table.
+
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `STATE_STORE_KEY` | Yes | — | Fernet encryption key (32+ chars, base64) |
@@ -542,7 +554,7 @@ All data endpoints require an `X-API-Key` header (per-key rate-limited). Hosting
 | `StealthBridge` | `test_stealth_bridge.py` | Mock all 4 drivers, verify dispatch | No |
 | `ProxyRotator` | `test_proxy_rotator.py` | Mock HTTP server for health checks | No |
 | `StateStore` | `test_auth.py` | Temp dir + fake Fernet key | No |
-| `FingerprintManager` | `test_validators.py` | Mock mitmproxy subprocess | No (unit) / Yes (integration) |
+| `FingerprintManager` | `test_fingerprint.py` | Mock Chrome-version detection; mock mitmproxy subprocess for `validate_ja4` | No (unit) / Yes (integration) |
 | `PublicScraper` | `test_bucket3.py` | Mock curl_cffi, mock patchright escalation | No |
 | `RedditScraper` | `test_bucket2.py` | Mock `.json` response with `respx` | No |
 | `FTScraper` | `test_bucket1.py` | Mock HTML + mock state injection | No |
@@ -566,12 +578,13 @@ All data endpoints require an `X-API-Key` header (per-key rate-limited). Hosting
 | Add a new driver | `core/drivers/new_driver.py` + `core/stealth_bridge.py` |
 | Change proxy behavior | `core/proxy_rotator.py` |
 | Change rate limiting / politeness | `core/rate_limiter.py` |
-| Change output format / dedup / resume | `core/storage.py` |
+| Change output format / dedup / resume | `core/storage/` (`base.py` seam, `jsonl.py`, `postgres.py`) |
 | Change soft-block detection | `utils/validators.py` |
 | Change login behavior | `auth/sso_handler.py` |
 | Change session encryption | `auth/state_store.py` |
 | Change humanization | `utils/humanize.py` |
-| Change CLI commands | `cli.py` |
+| Add/change a bucket command | per-feature sub-app `scrapers/<bucket>/cli.py` (NOT root `cli.py`) |
+| Change a global command (verify-fingerprint, list-sessions) | `cli.py` (thin root only) |
 | Change config schema | `config/settings.py` |
 | Add a new exception type | `exceptions.py` |
 
