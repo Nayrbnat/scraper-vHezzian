@@ -53,11 +53,17 @@ jobs:
           # **/uv.lock glob matching nothing.
           cache-dependency-glob: "pyproject.toml"
 
-      - name: Set up Python ${{ matrix.python-version }}
-        run: uv python install ${{ matrix.python-version }}
+      - name: Create venv on Python ${{ matrix.python-version }}
+        # uv venv provisions the matrix interpreter (fetching a managed CPython if needed) and creates
+        # ./.venv. Putting .venv/bin on PATH makes ruff/pytest resolve from it in later steps.
+        # (We avoid `uv pip install --system`: the runner's /usr Python is PEP-668 externally managed,
+        # and --system would ignore the matrix version entirely.)
+        run: |
+          uv venv --python ${{ matrix.python-version }}
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
 
       - name: Install project (+ test/dev extras)
-        run: uv pip install --system -e ".[dev,test]"
+        run: uv pip install -e ".[dev,test]"
 
       - name: Ruff lint
         run: ruff check .
