@@ -36,6 +36,7 @@
 - [ ] Set up `pytest` with `pytest-asyncio` and `conftest.py`.
 - [ ] Create directory structure (`core/`, `scrapers/{premium,community,public}/`, `auth/`, `utils/`, `config/`, `tests/`, `services/`). **One file per scraper** so parallel agents never edit the same file.
 - [ ] Implement `core/registry.py` (`@register_scraper` decorator, `get_scraper_for`, `discover_scrapers`) **in Foundation** — it is the conflict-free extension point every later scraper depends on (SPEC §3.16, Invariant #16).
+- [ ] **Restore the coverage gate.** It is temporarily relaxed in CI (`--cov-fail-under` dropped) because the scaffold-only repo has no `scrapeforge/` package to measure. As soon as the first module lands here, add `--cov-fail-under=80` back to the `Unit tests` step in `.github/workflows/ci.yml` (matches CLAUDE.md §3 / §11 success metric).
 - [ ] Add `.gitignore` (exclude `.env`, `.states/`, `__pycache__`, `.pytest_cache`).
 - [ ] Create `README.md` with setup instructions and architecture diagram.
 
@@ -448,7 +449,7 @@ Only after this passes do we build the full proxy/humanize/escalation stack agai
 | Soft-block detection | < 2% undetected | % of decoy/200 pages that slip past `response_is_valid()` (measured on fixtures + spot checks) |
 | Batch resumability | 100% | Killed batch re-run scrapes 0 duplicate URLs (manifest dedup) |
 | Output dedup | 0 dup ids | No duplicate `id`/content in the JSONL sink |
-| Test coverage | ≥ 80% | `pytest --cov --cov-fail-under=80` (excl. integration) — enforced in CI |
+| Test coverage | ≥ 80% | `pytest --cov --cov-fail-under=80` (excl. integration) — enforced in CI once the first `scrapeforge/` module exists; temporarily relaxed while the repo is scaffold-only (see §1.1) |
 | Code quality | 0 `ruff` errors | `ruff check .` + `ruff format --check .` (CI gate) |
 | Secrets in repo | 0 | `gitleaks` in CI |
 | API read latency | p95 < 200 ms | `GET /articles` under load (local) |

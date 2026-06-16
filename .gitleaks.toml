@@ -1,0 +1,23 @@
+# gitleaks configuration — extends the default ruleset with a NARROW allowlist for known-safe
+# test fixtures. Real-secret detection stays fully active everywhere else in the repo.
+#
+# Why this exists: the default `generic-api-key` rule flags the high-entropy (but fake) Fernet key in
+# tests/conftest.py. That value is a deterministic throwaway — base64 of
+# 'test-key-32-bytes-for-fernet-only00' — used only to satisfy Settings validation in unit tests.
+# The finding lives in a historical commit, so the allowlist (not just editing the file at HEAD) is
+# what clears it on the PR commit-range scan.
+title = "ScrapeForge gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Throwaway, non-secret test fixtures (never real credentials)."
+# `paths` and `regexes` are regexes. Scope to the shared fixture file + the exact fake value, so a
+# real leak anywhere else (including elsewhere in tests/) is still caught.
+paths = [
+  '''tests/conftest\.py''',
+]
+regexes = [
+  '''dGVzdC1rZXktMzItYnl0ZXMtZm9yLWZlcm5ldC1vbmx5MDA=''',
+]
