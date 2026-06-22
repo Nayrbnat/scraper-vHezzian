@@ -37,11 +37,19 @@ scrapeforge/
 │   │   ├── primp_driver.py         # PrimpDriver: Rust HTTP, OS-specific TLS
 │   │   ├── patchright_driver.py    # PatchrightDriver: real Chrome via Playwright fork
 │   │   └── nodriver_driver.py      # NodriverDriver: direct CDP WebSocket (nuclear option)
-│   └── db/                         # === DATASTORE (shared by ingestion + serving) ===
-│       ├── __init__.py
-│       ├── models.py               # SQLAlchemy 2.0 async: articles, jobs, sources (+ pgvector embedding)
-│       ├── session.py             # async engine + sessionmaker (DATABASE_URL)
-│       └── repositories.py        # query helpers used by the API (filters, pagination)
+│   ├── db/                         # === DATASTORE (shared by ingestion + serving) ===
+│   │   ├── __init__.py
+│   │   ├── models.py               # SQLAlchemy 2.0 async: articles, jobs, sources (+ pgvector embedding)
+│   │   ├── session.py             # async engine + sessionmaker (DATABASE_URL)
+│   │   └── repositories.py        # query helpers used by the API (filters, pagination)
+│   ├── queue/                      # === MESSAGE QUEUE PORT (+ adapters) ===
+│   │   ├── base.py                 # MessageQueue ABC (publish/reserve/ack/requeue/dead_letter; consume_once)
+│   │   ├── memory.py               # InMemoryMessageQueue (fake + local single-process)
+│   │   └── redis_queue.py          # RedisQueue: reliable-queue pattern + DLQ (SQS/Cloud Tasks later)
+│   └── objectstore/                # === OBJECT STORE PORT (+ adapters) ===
+│       ├── base.py                 # ObjectStore ABC (put/get/exists/delete; ObjectNotFound)
+│       ├── memory.py               # InMemoryObjectStore (fake)
+│       └── minio_store.py          # MinioStore: aioboto3 S3 API (MinIO now, real S3/GCS by config)
 │
 ├── api/                            # === SERVING PLANE (FastAPI: read + enqueue ONLY) ===
 │   ├── __init__.py
@@ -56,17 +64,22 @@ scrapeforge/
 │       ├── search.py               # POST /search (semantic, pgvector) — Phase-2 stub
 │       └── health.py               # GET /health, GET /ready
 │
-├── worker/                         # === INGESTION WORKERS (arq) ===
+├── worker/                         # === INGESTION PIPELINE WORKERS ===
 │   ├── __init__.py
-│   ├── main.py                     # WorkerSettings: consume queue → ScrapeEngine → PostgresSink
-│   └── scheduler.py                # SchedulerSettings: arq cron enqueues recurring scrapes
+│   ├── messages.py                 # shared JobMessage / ResultPointer contracts + raw_object_key
+│   ├── scraper_worker.py           # stateless: fetch → archive RAW (claim-check) → publish pointer
+│   ├── transform_worker.py         # idempotent: read raw → normalize → UPSERT (sole structured writer)
+│   ├── scheduler.py                # enqueue_due_sources: recurring scrapes per Source
+│   ├── run_scraper.py              # deployment entry point (drain loop) — python -m scrapeforge.worker.run_scraper
+│   ├── run_transform.py            # deployment entry point (drain loop)
+│   └── run_scheduler.py            # deployment entry point (cron loop)
 │
 ├── migrations/                     # Alembic migrations (versioned schema)
 │   ├── env.py
 │   └── versions/
 │
 ├── deployment/                     # === HOSTING (single VPS + Docker Compose) ===
-│   ├── docker-compose.yml          # api, worker, scheduler, nodriver, postgres, redis, caddy
+│   ├── docker-compose.yml          # api, scraper-worker, transform-worker, scheduler, nodriver, postgres, redis, minio, caddy
 │   ├── Dockerfile.api              # slim, no browser
 │   ├── Dockerfile.worker           # Python + system Chrome (patchright)
 │   └── Caddyfile                   # reverse proxy + auto-HTTPS
@@ -482,24 +495,36 @@ ScrapeEngine.scrape(url)
 
 ---
 
-## 7.5 Serving Plane (API) & the two-plane architecture
+## 7.5 Serving Plane (API) & the event-driven ingestion pipeline
 
-ScrapeForge runs as **two decoupled planes over one Postgres**, so the browser-heavy ingestion never
-blocks the lightweight, scalable read API.
+ScrapeForge runs as an **event-driven pipeline** (Phase 6): stateless scrapers → durable queue (+DLQ) →
+idempotent transform → storage split by purpose → read API. The browser-heavy ingestion never blocks the
+lightweight read API, and the raw payload is durable the instant it's fetched (claim-check), so it can be
+reprocessed without re-scraping.
 
 ```
-  INGESTION PLANE (heavy, browser+proxies)            SERVING PLANE (light, stateless)
-  arq worker → ScrapeEngine.batch_scrape              FastAPI (api/)
-      → PostgresSink.write() ──────────►  Postgres (+pgvector)  ◄────── GET /articles, GET /articles/{id}
-      ▲                                          ▲                       GET /jobs, GET /jobs/{id}
-      │ consume job                              │ read                  POST /jobs ─┐
-   Redis queue ◄─────────────────────────────────────────────────────── enqueue ◄──┘
-   scheduler (arq cron) ── enqueues recurring scrapes
+  Client ─► API (FastAPI, read + enqueue ONLY)
+             POST /jobs ─► queued Job + publish ──►  JOB QUEUE (Redis, MessageQueue port; SQS/Cloud Tasks later)
+             GET /articles,/jobs ◄── read Postgres                 │
+                                                                   ▼
+                                       SCRAPER WORKER (stateless: fetch + minimal parse)
+                                         • RAW ─► OBJECT STORE (MinIO/S3, immutable)   ◄── claim-check
+                                         • pointer ─► RESULTS QUEUE (+DLQ)
+                                                                   │
+                                                                   ▼
+                                       TRANSFORM WORKER (idempotent; SOLE structured writer)
+                                         • read raw ─► validate/clean/normalize/dedupe
+                                         • UPSERT ─► POSTGRES (+pgvector)  ◄── GET /articles serves this
+   scheduler ── enqueues recurring scrapes per Source
+   STORAGE split by purpose:  raw → object store (cheap, immutable)  |  structured → Postgres
 ```
 
-**Invariant #18 (decoupled planes):** the API is **read + enqueue only — it never drives a browser**.
-A `POST /jobs` pushes a job to Redis; an `arq` worker runs the `ScrapeEngine` and writes results via
-`PostgresSink` (which implements the existing `ArticleSink` seam). The API then serves stored rows.
+**Invariant #18 (event-driven pipeline):** the API is **read + enqueue only — it never drives a browser or
+runs the engine** (`POST /jobs` only persists a queued Job + publishes to the queue). The **scraper worker**
+is stateless w.r.t. the serving DB — it archives the RAW payload to the object store and publishes a small
+pointer; it NEVER writes Postgres. The **transform worker** is the sole writer of structured data + Job
+status (idempotent UPSERT by `sha256(url)`). Queue + object store sit behind ports (`MessageQueue`,
+`ObjectStore`) so cloud adapters slot in by addition. See SPEC §9 Invariant #18 for the full rule.
 
 ### Endpoints
 

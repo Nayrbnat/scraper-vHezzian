@@ -339,6 +339,18 @@ Only after this passes do we build the full proxy/humanize/escalation stack agai
 **Duration:** 4–6 days
 **Priority:** P1 (the product is "an API people call to retrieve data")
 
+> ✅ **DELIVERED** as a full **event-driven pipeline** (not direct scraper→Postgres writes; see the revised
+> Invariant #18). Built TDD across work-units W0–W9 (~165 new tests; full suite 574 passing, 94.5% cov):
+> queue + object-store **ports** (`core/queue/`, `core/objectstore/`) with Redis + MinIO/S3 adapters
+> (reliable-queue + DLQ; both validated against real Redis/MinIO); async datastore (`core/db/`) + Alembic;
+> `PostgresSink`; **stateless scraper worker** (fetch → claim-check raw to object store → publish pointer,
+> never touches the serving DB) and **idempotent transform worker** (read raw → normalize → UPSERT, sole
+> writer of structured data + Job status); FastAPI **read+enqueue** API with X-API-Key auth (Invariant #18
+> AST-enforced: no engine in routes); scheduler. Proven end-to-end: `tests/integration/test_pipeline_e2e.py`
+> drives `POST /jobs → scraper → raw → transform → Postgres → GET /articles` with no-duplicate-on-rerun.
+> Embeddings + working `/search` are deferred to the YouTube/RAG work (Phase 8). `docker compose config`
+> validates (api / scraper-worker / transform-worker / scheduler / postgres / redis / minio / caddy).
+
 ### 6.1 Datastore (`core/db/`)
 - [ ] SQLAlchemy 2.0 **async** models: `articles` (PK = sha256(url)), `jobs`, optional `sources` (SPEC §3.21).
 - [ ] `core/db/session.py` (async engine + `async_sessionmaker` from `DATABASE_URL`).
@@ -387,6 +399,29 @@ Only after this passes do we build the full proxy/humanize/escalation stack agai
 
 ---
 
+## 7.5. Phase 8: Bucket 4 — YouTube Transcripts (track → transcript → embed)
+**Goal:** Track AI/finance YouTubers, detect new uploads, pull transcripts, clean → embed into pgvector.
+**Priority:** P1 (new bucket the user requested) · **Status: SCHEDULED — blocked on the user's go-ahead to
+clone/vendor the adopted repos.**
+
+**Do NOT build from scratch.** Adopted stack (user decision): **youtube-transcript-api + scrapetube**
+(primary), **yt-dlp + faster-whisper** (ASR fallback for PoToken/captions-disabled videos). Full shortlist,
+2026 anti-block reality, and the architecture are in **`docs/research/youtube-transcripts.md`** (the Phase-8
+playbook). Two-stage pipeline that **reuses the whole foundation** (engine seam, claim-check → transform →
+PostgresSink): `track channels (scrapetube/RSS, dedup vs DB) → fetch transcript (youtube-transcript-api via
+the residential ProxyRotator, wrapped in asyncio.to_thread) → clean → Article(content=transcript) → sink`.
+Self-registers as `scrapers/youtube/` (Invariant #16). Hard constraint: **residential proxies mandatory**
+(datacenter IPs are blocked); never run live YouTube fetches in CI (integration-only). Embeddings + working
+`/search` (pgvector) land here, the first consumer that needs them.
+
+- [ ] **Pre-req:** user confirms repos to clone + residential-proxy provider + GPU-for-Whisper decision + channel list.
+- [ ] Upload detector (scrapetube/yt-dlp flat-playlist; RSS supplemental); dedup vs DB seen-set.
+- [ ] `scrapers/youtube/` transcript scraper (youtube-transcript-api via ProxyRotator; PoToken/IpBlocked handling).
+- [ ] ASR fallback (yt-dlp audio → faster-whisper), GPU-gated/queued.
+- [ ] Embedding hook in the transform worker (no-op today) → real pgvector embeddings + working `POST /search`.
+
+---
+
 ## 8. Risk Register & Mitigation
 
 | Risk | Probability | Impact | Mitigation |
@@ -418,6 +453,7 @@ Only after this passes do we build the full proxy/humanize/escalation stack agai
 | Phase 5: Integration | 3–4 days | Day 23 | Engine, docs, performance, final QA |
 | Phase 6: Serving API & Datastore | 4–6 days | Day 29 | Postgres, PostgresSink, FastAPI read+jobs, workers |
 | Phase 7: Deployment | 2–3 days | Day 32 | Docker Compose on a VPS, runbook, scheduled scraping |
+| Phase 8: Bucket 4 — YouTube transcripts | 4–6 days | TBD | Track channels → transcripts (adopted libs) → embed (pgvector); blocked on repo go-ahead |
 | **Buffer** | 3 days | **Day 35** | Contingency for anti-bot arms race |
 
 **Total Estimated Duration:** ~5 weeks (1 developer full-time with Claude Code assistance).

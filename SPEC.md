@@ -1646,4 +1646,21 @@ class RedditSettings(BaseSettings):
 15. **Soft blocks are failures.** A 200 response that fails `validators.response_is_valid()` is treated as a `ChallengeError`, never reported as success.
 16. **No central registry edits (extension by addition).** Scrapers self-register via `@register_scraper(...)` from `core/registry.py`. Adding a scraper is one new file; editing a shared dict/`engine.py` to register is forbidden. Same principle for CLI (per-bucket Typer sub-apps) and config (per-module settings fragments) — agents **add files, never edit shared seam files**. The only sanctioned shared file is `pyproject.toml` (deps), routed through the lead.
 17. **One feature = one folder/branch/worktree.** A teammate works only inside its assigned package and never edits another feature's files (enforced socially by `CLAUDE.md`, mechanically by CODEOWNERS — see `GitHub.md`).
-18. **Decoupled planes.** Ingestion (browsers/proxies, in `worker/`) and serving (`api/`) are separate processes over one Postgres. The **API is read + enqueue only and MUST never drive a browser or call `ScrapeEngine` directly** — it pushes a job to Redis; a worker runs the engine and writes via `PostgresSink`. All data endpoints require `X-API-Key` auth. Storage stays behind the `ArticleSink` seam (`JsonlSink` local, `PostgresSink` server) so the engine is store-agnostic.
+18. **Event-driven pipeline; storage split by purpose (Phase 6).** Ingestion and serving are decoupled
+    stages over durable queues (Redis behind the `MessageQueue` port; SQS/Cloud Tasks later) — NOT a direct
+    scraper→Postgres write. The flow is:
+    - **API** (`api/`) is **read + enqueue only** — it MUST never drive a browser or call `ScrapeEngine`/a
+      driver/a worker. `POST /jobs` persists a queued `Job` and **publishes to the job queue**; it serves
+      stored rows. All data endpoints require `X-API-Key` auth. (AST-enforced in tests.)
+    - **Scraper worker** (`worker/scraper_worker.py`) is **stateless w.r.t. the serving DB**: it fetches
+      (curl_cffi, minimal parse), writes the RAW payload to **object storage** (claim-check, immutable, via
+      the `ObjectStore` port — MinIO/S3), and **publishes a small pointer** to the results queue. It NEVER
+      writes Postgres.
+    - **Transform worker** (`worker/transform_worker.py`) is the **sole writer of structured data + Job
+      status**: it reads raw from object storage, validates/cleans/normalizes, and **idempotently UPSERTs**
+      into Postgres (dedup by PK = `sha256(url)`). Poison messages → DLQ after `QUEUE_MAX_RETRIES`.
+    - **Storage is split by purpose:** raw → object store (cheap, immutable, replayable); structured →
+      Postgres behind the `ArticleSink` seam (`JsonlSink` local CLI, `PostgresSink` server). Embeddings
+      (pgvector) are generated in the transform layer only when semantic search is enabled.
+    Rationale: raw is the expensive artifact (a residential-proxy request + block risk), so it is made
+    durable the instant it is fetched — enabling reprocessing without re-scraping.
