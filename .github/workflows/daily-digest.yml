@@ -1,27 +1,50 @@
 name: Daily digest
 
-# Sends Dee the Hezzian daily digest every morning.
-# - schedule: runs automatically once merged to the default branch (GitHub cron is UTC, best-effort).
-# - workflow_dispatch: manual trigger (works on any branch) so we can test before/after merge.
+# Sends Dee the Hezzian daily digest at 09:00 UK time, every day.
 #
-# Requires these repository secrets (Settings → Secrets and variables → Actions):
-#   DIGEST_SMTP_USER, DIGEST_SMTP_PASSWORD (Gmail app password), DIGEST_TO, DIGEST_FROM
-# Preview mode needs none; this job SENDS for real via SMTP.
+# GitHub cron is UTC and does NOT follow British Summer Time, so we trigger at BOTH 08:00 and
+# 09:00 UTC and a gate job lets exactly ONE proceed — the one that is 09:00 in Europe/London:
+#   - BST (summer, UTC+1): 08:00 UTC = 09:00 London  -> send;  09:00 UTC = 10:00 -> skip
+#   - GMT (winter, UTC+0): 09:00 UTC = 09:00 London  -> send;  08:00 UTC = 08:00 -> skip
+# workflow_dispatch (manual) always sends, regardless of the hour.
 #
-# NOTE: until the source buckets + AI brief (Phase 9) land, this sends the BUNDLED SAMPLE digest —
-# it proves the daily delivery cadence end-to-end. Swap `--source sample` for a real corpus later.
+# Requires repo secrets: DIGEST_SMTP_USER, DIGEST_SMTP_PASSWORD (Gmail app password), DIGEST_TO, DIGEST_FROM.
+# NOTE: until Phase 9 (source buckets + AI brief) lands, this sends the BUNDLED SAMPLE digest —
+# it proves the daily delivery cadence. Swap `--source sample` for a real corpus later.
 
 on:
   schedule:
-    - cron: "0 6 * * *" # 06:00 UTC daily (~07:00 London). Adjust to taste.
+    - cron: "0 8 * * *" # 08:00 UTC = 09:00 London during BST (summer)
+    - cron: "0 9 * * *" # 09:00 UTC = 09:00 London during GMT (winter)
   workflow_dispatch: {}
 
 permissions:
   contents: read
 
 jobs:
+  gate:
+    name: gate (09:00 Europe/London, DST-safe)
+    runs-on: ubuntu-latest
+    outputs:
+      send: ${{ steps.check.outputs.send }}
+    steps:
+      - id: check
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "manual dispatch -> send"
+            echo "send=true" >> "$GITHUB_OUTPUT"
+          elif [ "$(TZ='Europe/London' date +%H)" = "09" ]; then
+            echo "09:00 Europe/London -> send"
+            echo "send=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "not 09:00 Europe/London (hour=$(TZ='Europe/London' date +%H)) -> skip"
+            echo "send=false" >> "$GITHUB_OUTPUT"
+          fi
+
   send-digest:
     name: send daily digest
+    needs: gate
+    if: needs.gate.outputs.send == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
