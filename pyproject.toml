@@ -90,6 +90,11 @@ omit = [
     "*/tests/*",
     "*/migrations/*",
     "scrapeforge/__main__.py",
+    # Deployment entry points: thin glue (build real adapters + run a forever poll loop);
+    # the logic they call is unit-tested. Exercised only by a live `docker compose up`.
+    "scrapeforge/worker/run_scraper.py",
+    "scrapeforge/worker/run_transform.py",
+    "scrapeforge/worker/run_scheduler.py",
 ]
 
 [tool.coverage.report]

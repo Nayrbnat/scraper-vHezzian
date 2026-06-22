@@ -9,6 +9,11 @@ name: scrapeforge
 x-app-env: &app-env
   DATABASE_URL: postgresql+asyncpg://scrapeforge:${POSTGRES_PASSWORD:?set in .env}@postgres:5432/scrapeforge
   REDIS_URL: redis://redis:6379/0
+  OBJECT_STORE_ENDPOINT: http://minio:9000
+  OBJECT_STORE_BUCKET: scrapeforge-raw
+  OBJECT_STORE_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+  OBJECT_STORE_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+  OBJECT_STORE_REGION: us-east-1
   STATE_STORE_KEY: ${STATE_STORE_KEY:?set in .env}
   STATE_STORE_PATH: /data/states
   PROXY_LIST_PATH: /data/proxies.txt
@@ -32,30 +37,48 @@ services:
       - "8000"
     restart: unless-stopped
 
-  # --- Ingestion plane (heavy): consumes jobs, drives browsers, writes to Postgres. ---
-  worker:
+  # --- Ingestion plane (heavy): SCRAPER worker. Stateless w.r.t. the serving DB —
+  #     fetches, archives the RAW payload to object storage (claim-check), and publishes a
+  #     pointer to the results queue. Never writes Postgres. Scale with --scale scraper-worker=N. ---
+  scraper-worker:
     build:
       context: ..
       dockerfile: deployment/Dockerfile.worker
-    command: ["arq", "worker.main.WorkerSettings"]
+    command: ["python", "-m", "scrapeforge.worker.run_scraper"]
+    environment: *app-env
+    depends_on:
+      redis: { condition: service_started }
+      minio: { condition: service_started }
+      nodriver: { condition: service_started }
+    volumes:
+      - state-data:/data          # encrypted session states + proxies.txt (mounted, not baked)
+    shm_size: "1gb"               # Chrome needs shared memory headroom (future browser drivers)
+    restart: unless-stopped
+
+  # --- Processing plane: TRANSFORM worker. The SOLE writer of structured data + Job status.
+  #     Reads raw from object storage, validates/normalizes, idempotent-UPSERTs into Postgres.
+  #     No browser (slim api image). Scale with --scale transform-worker=N. ---
+  transform-worker:
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile.api
+    command: ["python", "-m", "scrapeforge.worker.run_transform"]
     environment: *app-env
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_started }
-      nodriver: { condition: service_started }
-    volumes:
-      - state-data:/data          # encrypted session states + proxies.txt (mounted, not baked)
-    shm_size: "1gb"               # Chrome needs shared memory headroom
+      minio: { condition: service_started }
     restart: unless-stopped
 
   # --- Scheduler: enqueues recurring scrapes per configured sources ("continuously populate"). ---
   scheduler:
     build:
       context: ..
-      dockerfile: deployment/Dockerfile.worker
-    command: ["arq", "worker.scheduler.SchedulerSettings"]
+      dockerfile: deployment/Dockerfile.api
+    command: ["python", "-m", "scrapeforge.worker.run_scheduler"]
     environment: *app-env
     depends_on:
+      postgres: { condition: service_healthy }
       redis: { condition: service_started }
     restart: unless-stopped
 
@@ -85,12 +108,29 @@ services:
       retries: 5
     restart: unless-stopped
 
-  # --- Job queue. ---
+  # --- Job + results queues (Redis lists; reliable-queue pattern with a DLQ). ---
   redis:
     image: redis:7-alpine
     command: ["redis-server", "--save", "60", "1", "--appendonly", "yes"]
     volumes:
       - redis-data:/data
+    restart: unless-stopped
+
+  # --- Object store: immutable RAW payloads (claim-check). S3-compatible; swap to AWS S3/GCS
+  #     by changing OBJECT_STORE_ENDPOINT only. ---
+  minio:
+    image: minio/minio
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     restart: unless-stopped
 
   # --- Reverse proxy + automatic HTTPS in front of the API. ---
@@ -112,6 +152,7 @@ services:
 volumes:
   pg-data:
   redis-data:
+  minio-data:
   state-data:
   caddy-data:
   caddy-config:
