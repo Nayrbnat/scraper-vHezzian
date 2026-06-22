@@ -59,6 +59,26 @@ def scrape_community(
 
         success_count = asyncio.run(_run())
         typer.echo(f"Scraped {success_count} articles from r/{target} → {output}.jsonl")
+
+    elif platform == "substack":
+        from scrapeforge.scrapers.community.substack import SubstackScraper
+
+        scraper_ss = SubstackScraper()
+
+        async def _run_ss() -> int:
+            results = await scraper_ss.scrape_publication(target, limit=limit)
+            sink = JsonlSink(output)
+            n = 0
+            for result in results:
+                if result.status == "success":
+                    await sink.write(result)
+                    n += 1
+            await sink.close()
+            return n
+
+        success_count = asyncio.run(_run_ss())
+        typer.echo(f"Scraped {success_count} articles from {target} → {output}.jsonl")
+
     else:
-        typer.echo(f"Unknown platform: {platform!r}. Supported: reddit", err=True)
+        typer.echo(f"Unknown platform: {platform!r}. Supported: reddit, substack", err=True)
         raise typer.Exit(code=1)
