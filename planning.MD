@@ -422,6 +422,86 @@ Self-registers as `scrapers/youtube/` (Invariant #16). Hard constraint: **reside
 
 ---
 
+## 7.6. Phase 9: Personalized source aggregation + AI daily market brief (the Hezzian product layer)
+**Goal:** Per onboarded user, take a **JSON profile** declaring which platforms they're connected to
+(X, LinkedIn, Instagram, Substack, Reddit, YouTube, news…) + their **watchlist** (portfolio /
+want-to-start-a-position companies) + their **industry themes** (deeply specific, e.g. *hybrid bonding →
+TCNCF vs MUF-MDF, thermal compression*). Each connected source feeds its matching scraper bucket; all the
+day's content is consolidated, and an **AI agent produces a daily brief of what CHANGED in the market**
+for (1) the watchlist companies and (2) the tracked themes. **Priority:** P0 (this is the product).
+**Status: PLANNED.** **Prototype = Dee's single JSON profile + Dee's credentials**, brief emailed daily to
+nayrbnat@gmail.com.
+
+**This extends the digest prototype** (`scrapeforge/digest/`, already built): the `Subscriber`/
+`DigestPreferences` schema grows into the richer profile below, and the naive keyword matcher is replaced
+by the LLM brief agent. Delivery reuses the existing `EmailSender` (preview → SMTP).
+
+### 9.1 The user source-config JSON (the input — `data/profiles/<user>.json`)
+The onboarding questionnaire ("what do you use?") produces this; for the prototype it's hand-authored for
+Dee. Sketch (forward-compatible Pydantic models, same pattern as `Subscriber`):
+```jsonc
+{
+  "id": "dee", "name": "Dee", "email": "nayrbnat@gmail.com",
+  "sources": [                       // which platforms to connect + WHERE to pull from
+    {"platform": "x",        "enabled": true,  "follow": {"accounts": ["@user1"], "lists": [], "search": ["hybrid bonding"]}, "credential_ref": "X"},
+    {"platform": "substack", "enabled": true,  "follow": {"newsletters": ["semianalysis.com"]}},
+    {"platform": "reddit",   "enabled": true,  "follow": {"subreddits": ["semiconductors"]}},
+    {"platform": "youtube",  "enabled": true,  "follow": {"channels": ["<channel_id>"]}},
+    {"platform": "linkedin", "enabled": false, "follow": {"companies": [], "people": []}, "credential_ref": "LINKEDIN"},
+    {"platform": "instagram","enabled": false, "follow": {"accounts": []}, "credential_ref": "INSTAGRAM"}
+  ],
+  "watchlist": [                     // companies; held OR want-to-start-a-position
+    {"name": "TSMC", "aliases": ["Taiwan Semiconductor", "2330.TW"], "stance": "watch"},
+    {"name": "Besi", "aliases": ["BE Semiconductor"], "stance": "position"}
+  ],
+  "themes": [                        // hierarchical, deeply specific — drives day-over-day tracking
+    {"name": "hybrid bonding", "keywords": ["hybrid bonding", "wafer-on-wafer", "die-to-wafer"],
+     "subtopics": [
+       {"name": "TCNCF", "keywords": ["thermal compression NCF", "TC-NCF"]},
+       {"name": "MUF-MDF", "keywords": ["mass reflow MUF", "molded underfill"]}
+     ]}
+  ],
+  "output": {"cadence": "daily", "format": "brief", "delivery": "email"}
+}
+```
+`credential_ref` points to a key (encrypted `StateStore` once Phase 4 lands; `.env` for the prototype) —
+**never inline secrets in the profile JSON.**
+
+### 9.2 Source buckets (one self-registering scraper per platform → the existing pipeline)
+Each platform is a new bucket that reuses the whole foundation (self-register via `@register_scraper`,
+claim-check raw → transform → store). Difficulty + dependency varies sharply:
+- [ ] **Easy / reachable now:** news (done), Reddit (done), Substack (Bucket 2), YouTube (Phase 8),
+      **X** (via API / syndication endpoints where possible). Start the prototype here.
+- [ ] **Hard / gated (defer):** **LinkedIn, Instagram** — require login + aggressive anti-bot + real
+      ToS/account-ban + legal risk. Depend on **browser drivers (Phase 2)** + **auth/encrypted StateStore
+      (Phase 4)** + **residential proxies**. Treat as a later, carefully-scoped add; never in CI.
+
+### 9.3 Consolidation, dedup & tagging
+All sources land in the article corpus (Postgres); entity-resolve + dedup (PK = sha256(url)), then tag each
+item to watchlist companies + themes (keyword now; **semantic relevance via pgvector once Phase 8 embeddings
+land** — that's the first real consumer of `/search`).
+
+### 9.4 The AI brief agent (`scrapeforge/brief/` — extends the digest)
+- [ ] Pull the day's items relevant to the profile (watchlist + themes; keyword + semantic filter).
+- [ ] An **LLM (Claude)** synthesizes a structured daily brief: per-company "what changed today", per-theme
+      "how it's evolving + what's new", each with **source citations**. Replaces the naive summarizer.
+- [ ] **Day-over-day deltas, not a re-summary:** keep a per-company / per-theme running state (what was known
+      yesterday) so the brief reports *changes*. This is the core of "what changes in the market each day."
+- [ ] Deliver via the existing `EmailSender` (preview → SMTP), reusing the digest renderer.
+
+### 9.5 Open decisions for Dee (resolve when prioritizing this phase)
+- **First-prototype source set:** suggest X + Substack + Reddit + news + YouTube; defer LinkedIn/Instagram
+  (hardest + legal). Confirm.
+- **LLM model + budget** for the brief agent (Opus for synthesis quality vs Sonnet for cost; ~daily run cost).
+- **Theme-tracking memory:** confirm the agent keeps per-theme/company state so briefs are deltas (implies a
+  small state store of "last known" per entity).
+- **Credentials/auth** for gated social sources (per-platform; needs StateStore + residential proxies; ToS risk).
+
+**Dependencies:** digest prototype (built) + serving pipeline (Phase 6, built); browser drivers (Phase 2) +
+auth/StateStore (Phase 4) for gated sources; embeddings (Phase 8) for semantic relevance.
+
+---
+
 ## 8. Risk Register & Mitigation
 
 | Risk | Probability | Impact | Mitigation |
@@ -436,6 +516,8 @@ Self-registers as `scrapers/youtube/` (Invariant #16). Hard constraint: **reside
 | cf_clearance invalidated by fingerprint skew on handoff | Medium | High | Invariant #11: one `BrowserProfile` + proxy per chain; curl impersonate aligned to installed Chrome major. |
 | Site serves 200 decoy/honeypot instead of 403 | Medium | Medium | `response_is_valid()` soft-block detection; treated as `ChallengeError`; `soft_block_rate` metric alerts. |
 | JA4 fingerprint drift (browser updates) | Medium | Medium | Monthly validation via `mitmproxy`. `curl_impersonate_target()` aligns the alias to the *installed* Chrome major version, not a stale pin. |
+| Gated social sources (LinkedIn/Instagram/X) — login walls, aggressive blocking, ToS/legal, account bans (Phase 9) | High | High | Defer to a later, carefully-scoped add. Use encrypted `StateStore` + residential proxies; per-account rate floors; start the prototype with reachable sources (X API/syndication, Substack, Reddit, news, YouTube); never run live social fetches in CI. |
+| AI brief hallucination / unsourced claims (Phase 9) | Medium | High | Every brief item must cite a stored source row; the LLM summarizes only retrieved corpus text, never free-generates facts; day-over-day deltas computed from stored state. |
 
 ---
 
@@ -454,6 +536,7 @@ Self-registers as `scrapers/youtube/` (Invariant #16). Hard constraint: **reside
 | Phase 6: Serving API & Datastore | 4–6 days | Day 29 | Postgres, PostgresSink, FastAPI read+jobs, workers |
 | Phase 7: Deployment | 2–3 days | Day 32 | Docker Compose on a VPS, runbook, scheduled scraping |
 | Phase 8: Bucket 4 — YouTube transcripts | 4–6 days | TBD | Track channels → transcripts (adopted libs) → embed (pgvector); blocked on repo go-ahead |
+| Phase 9: Source aggregation + AI daily brief | 5–8 days | TBD | Per-user JSON profile → source buckets → consolidate → AI daily market brief (the product); prototype for Dee |
 | **Buffer** | 3 days | **Day 35** | Contingency for anti-bot arms race |
 
 **Total Estimated Duration:** ~5 weeks (1 developer full-time with Claude Code assistance).
