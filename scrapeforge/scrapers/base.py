@@ -195,6 +195,10 @@ class BaseScraper(ABC):
             content=fields.get("content") or "",
             author=fields.get("author"),
             publish_date=None,
+            # Carry the raw source HTML so the ingestion pipeline can archive it to the
+            # object store (claim-check) and the transform layer can re-extract from it.
+            # Local sinks (JsonlSink/PostgresSink) do not write this field, so no bloat.
+            raw_html=html,
             metadata={
                 "source_domain": domain,
                 "bucket": self.BUCKET,
