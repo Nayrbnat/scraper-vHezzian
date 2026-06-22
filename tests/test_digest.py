@@ -167,8 +167,11 @@ class TestCli:
         assert "Built digest for Dee" in result.output
         assert (tmp_path / "nayrbnat_at_gmail_com.html").exists()
 
-    def test_send_without_creds_fails_cleanly(self, tmp_path, monkeypatch) -> None:
-        for var in ("DIGEST_SMTP_USER", "DIGEST_SMTP_PASSWORD"):
+    def test_send_without_creds_fails_cleanly(self, monkeypatch) -> None:
+        # Hermetic: disable the CLI's .env auto-load so a developer's real local .env can't
+        # repopulate the creds (which would defeat this test AND actually send an email).
+        monkeypatch.setattr("scrapeforge.digest.cli._load_dotenv", lambda: None)
+        for var in ("DIGEST_SMTP_USER", "DIGEST_SMTP_PASSWORD", "DIGEST_FROM"):
             monkeypatch.delenv(var, raising=False)
         result = CliRunner().invoke(digest_app, ["send", "--yes"])
         assert result.exit_code == 1
