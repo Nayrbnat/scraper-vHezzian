@@ -82,3 +82,71 @@ def scrape_community(
     else:
         typer.echo(f"Unknown platform: {platform!r}. Supported: reddit, substack", err=True)
         raise typer.Exit(code=1)
+
+
+@community_app.command("scrape-substacks")
+def scrape_substacks(
+    sector: str | None = typer.Option(
+        None, "--sector", "-s", help="Only scrape this sector (see --list for the labels)"
+    ),
+    limit: int = typer.Option(10, "--limit", "-l", help="Max posts to fetch per publication"),
+    max_pubs: int | None = typer.Option(
+        None, "--max", "-m", help="Cap the number of publications scraped"
+    ),
+    output: Path = typer.Option(  # noqa: B008
+        Path("./output"),
+        "--output",
+        "-o",
+        help="Output base path (JSONL written here)",
+    ),
+    list_only: bool = typer.Option(
+        False, "--list", help="List the selected publications and exit (no scraping)"
+    ),
+) -> None:
+    """Scrape the curated investing-Substack list via the publication archive API.
+
+    Drives ``SubstackScraper.scrape_publication`` (archive discovery + per-post
+    fetch, public-only) over the selected publications and writes every successful
+    article to a JSONL sink — the same on-demand path as ``community scrape``.
+    """
+    from scrapeforge.scrapers.community.substack_sources import select_sources
+
+    selected = select_sources(sector=sector, limit=max_pubs)
+    if not selected:
+        typer.echo(f"No curated publications match --sector {sector!r}.", err=True)
+        raise typer.Exit(code=1)
+
+    if list_only:
+        for s in selected:
+            flag = " [paid-leaning]" if s.paywall else ""
+            typer.echo(f"{s.sector:22s} {s.name:30s} {s.url}{flag}")
+        typer.echo(f"\n{len(selected)} publication(s) selected (list-only, nothing scraped).")
+        return
+
+    _use_selector_loop()
+
+    from scrapeforge.scrapers.community.substack import SubstackScraper
+
+    scraper = SubstackScraper()
+
+    async def _run() -> tuple[int, int]:
+        sink = JsonlSink(output)
+        articles = 0
+        scraped_pubs = 0
+        try:
+            for s in selected:
+                results = await scraper.scrape_publication(s.base, limit=limit)
+                wrote = 0
+                for result in results:
+                    if result.status == "success":
+                        await sink.write(result)
+                        wrote += 1
+                articles += wrote
+                scraped_pubs += 1
+                typer.echo(f"  {s.name:30s} {wrote} article(s)")
+        finally:
+            await sink.close()
+        return scraped_pubs, articles
+
+    pubs, total = asyncio.run(_run())
+    typer.echo(f"Scraped {total} articles from {pubs} publication(s) → {output}.jsonl")
