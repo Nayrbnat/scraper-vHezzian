@@ -86,6 +86,35 @@ class TestSettingsDefaults:
         assert s.LOG_LEVEL == "WARNING"
         assert s.LOG_FORMAT == "text"
 
+    def test_serving_pipeline_defaults(self, fake_env: dict[str, str]) -> None:
+        s = Settings()
+        assert s.DATABASE_URL.startswith("postgresql+asyncpg://")
+        assert s.REDIS_URL.startswith("redis://")
+        assert s.JOB_QUEUE == "scrapeforge:jobs"
+        assert s.RESULTS_QUEUE == "scrapeforge:results"
+        assert s.DLQ_SUFFIX == ":dlq"
+        assert s.QUEUE_MAX_RETRIES == 5
+        assert s.OBJECT_STORE_BUCKET == "scrapeforge-raw"
+        assert s.OBJECT_STORE_ENDPOINT == "http://localhost:9000"
+        assert s.API_RATE_LIMIT_PER_MIN == 120
+
+
+# ---------------------------------------------------------------------------
+# api_key_set helper
+# ---------------------------------------------------------------------------
+
+
+class TestApiKeySet:
+    def test_empty_keys_yield_empty_set(self, fake_env: dict[str, str]) -> None:
+        assert Settings(API_KEYS="").api_key_set() == set()
+
+    def test_csv_parsed_and_trimmed(self, fake_env: dict[str, str]) -> None:
+        # whitespace trimmed; empty entries dropped
+        assert Settings(API_KEYS="a, b ,, c").api_key_set() == {"a", "b", "c"}
+
+    def test_single_key(self, fake_env: dict[str, str]) -> None:
+        assert Settings(API_KEYS="solo").api_key_set() == {"solo"}
+
 
 # ---------------------------------------------------------------------------
 # Validation failures

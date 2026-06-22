@@ -40,6 +40,7 @@ dependencies = [
     "pgvector>=0.3",
     "arq>=0.26",
     "redis>=5.0",
+    "aioboto3>=13.0",         # async S3 client for the object store (MinIO now, S3/GCS later)
 ]
 
 [project.optional-dependencies]
@@ -56,6 +57,8 @@ test = [
     "freezegun>=1.5",         # fake clock for RateLimiter / TTL tests
     "pytest-postgresql>=6.0", # ephemeral Postgres for db-touching unit tests
     "psycopg[binary]>=3.1",   # pytest-postgresql's driver; [binary] bundles libpq (no system lib needed)
+    "fakeredis>=2.21",        # in-memory Redis for queue-adapter unit tests (no live Redis)
+    "moto[s3]>=5.0",          # in-memory S3 mock for object-store unit tests (no live MinIO)
 ]
 
 [project.scripts]

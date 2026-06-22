@@ -85,6 +85,30 @@ class Settings(BaseSettings):
     LOG_FORMAT: Literal["text", "json"] = "text"
 
     # ------------------------------------------------------------------
+    # Serving plane / ingestion pipeline (Phase 6) — core/shared infra
+    # ------------------------------------------------------------------
+    # Datastore (async DSN, e.g. postgresql+asyncpg://user:pass@host:5432/db)
+    DATABASE_URL: str = "postgresql+asyncpg://scrapeforge:scrapeforge@localhost:5432/scrapeforge"
+    # Redis (queue backend; SQS/Cloud Tasks adapters slot in later behind MessageQueue)
+    REDIS_URL: str = "redis://localhost:6379/0"
+    JOB_QUEUE: str = "scrapeforge:jobs"  # API -> scraper workers
+    RESULTS_QUEUE: str = "scrapeforge:results"  # scraper -> transform workers
+    DLQ_SUFFIX: str = ":dlq"  # dead-letter stream suffix (poison messages)
+    QUEUE_MAX_RETRIES: int = 5  # attempts before a message is dead-lettered
+
+    # Object store (raw payloads; MinIO now, real S3/GCS by endpoint config)
+    OBJECT_STORE_ENDPOINT: str = "http://localhost:9000"  # MinIO; empty/None => AWS default
+    OBJECT_STORE_BUCKET: str = "scrapeforge-raw"
+    # Defaults are MinIO's well-known LOCAL dev credentials; production overrides via env.
+    OBJECT_STORE_ACCESS_KEY: str = "minioadmin"
+    OBJECT_STORE_SECRET_KEY: str = "minioadmin"  # noqa: S105  (local MinIO default, not a secret)
+    OBJECT_STORE_REGION: str = "us-east-1"
+
+    # API auth (comma-separated keys -> set; per-key rate limit)
+    API_KEYS: str = ""  # e.g. "key1,key2"; parse via api_key_set
+    API_RATE_LIMIT_PER_MIN: int = 120
+
+    # ------------------------------------------------------------------
     # Pydantic-settings config
     # ------------------------------------------------------------------
     model_config = SettingsConfigDict(
@@ -113,3 +137,15 @@ class Settings(BaseSettings):
                 'print(Fernet.generate_key().decode())"'
             )
         return v
+
+    # ------------------------------------------------------------------
+    # Derived helpers
+    # ------------------------------------------------------------------
+
+    def api_key_set(self) -> set[str]:
+        """Parse ``API_KEYS`` (comma-separated) into a set of valid keys.
+
+        Empty/whitespace entries are dropped.  An empty result means no key is
+        configured — the API auth layer treats that as "reject all" (fail closed).
+        """
+        return {k.strip() for k in self.API_KEYS.split(",") if k.strip()}
