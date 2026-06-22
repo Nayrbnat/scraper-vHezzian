@@ -61,9 +61,15 @@ def deliver(
     *,
     source: str = "sample",
     sender: EmailSender | None = None,
+    to: str | None = None,
 ) -> Digest:
-    """End-to-end: load → build → render → send. Defaults to the preview sender (no creds)."""
+    """End-to-end: load → build → render → send. Defaults to the preview sender (no creds).
+
+    The recipient is the subscriber's own email (the production model: each subscriber gets their
+    own digest). Pass *to* (e.g. from ``DIGEST_TO``) to override it — handy for prototype testing
+    so every send goes to one test inbox regardless of the seeded subscriber.
+    """
     subscriber = load_subscriber(subscriber_path)
     digest, email = make_digest(subscriber, source)
-    (sender or PreviewEmailSender()).send(subscriber.email, email)
+    (sender or PreviewEmailSender()).send(to or subscriber.email, email)
     return digest
