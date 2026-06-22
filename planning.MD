@@ -29,6 +29,14 @@
 **Duration:** 3–4 days  
 **Priority:** P0 (Blocking all other phases)
 
+> ✅ **DELIVERED.** All foundation modules implemented TDD across work-units U1–U6: `exceptions.py`,
+> `core/models.py`, `config/settings.py`, `utils/{humanize,parsers,validators}.py`,
+> `core/{registry,rate_limiter,circuit_breaker,fingerprint_manager,proxy_rotator,engine}.py`,
+> `core/storage/{base,jsonl}.py`, `core/drivers/{base,curl_cffi_driver}.py`, `core/stealth_bridge.py`,
+> `scrapers/base.py`, `scrapers/public/public.py`, and the thin Typer CLI. **409 unit tests, 95% coverage**
+> (`--cov-fail-under=80` restored in CI). primp/patchright/nodriver drivers and auth are deferred to later
+> phases — the `_init_backend` factory raises a clear `DriverError` for them (honest seam).
+
 ### 1.1 Project Skeleton & Tooling
 - [ ] Initialize `pyproject.toml` with all dependencies (patchright, nodriver, curl_cffi, primp, pydantic, typer, loguru, cryptography, **selectolax** (parser, decided up front — lxml fallback), **aiofiles** (async JSONL writes), **filelock**, pytest, pytest-asyncio, etc.).
 - [ ] **Async-first decision:** the driver/bridge/scraper/engine layer is fully `async` (curl_cffi `AsyncSession`, `patchright.async_api`, native `nodriver`, `primp` via `asyncio.to_thread`). No `sync_api`, no `asyncio.run()` inside the loop. Configure `pytest-asyncio` accordingly.
@@ -120,6 +128,13 @@
 the async loop, the fingerprint, and the output path all working together on one real request.
 **Duration:** 0.5–1 day
 **Priority:** P0 (run as soon as config + a minimal async curl_cffi bridge + sink exist)
+
+> ✅ **DELIVERED (U7).** `tests/integration/test_vertical_slice.py` (`@integration`, sandbox-only) drives one
+> real `curl_cffi` fetch end-to-end: `ScrapeEngine → PublicScraper → StealthBridge[curl_cffi] → real TLS GET →
+> validators → parsers → Article → JsonlSink (JSONL + manifest) → resume`. Passes live against
+> `books.toscrape.com` (zero anti-bot / no DNS-block risk). The JA4/`verify-fingerprint` mitmproxy check is a
+> documented MANUAL step (not run in CI). Plus U8: the **first curated real site** (Reddit via `.json`, Bucket 2)
+> proving the per-site curation pipeline — see `docs/research/reddit.md`.
 
 - [ ] Stand up a minimal `async` `CurlCffiDriver` + `StealthBridge` (`async with`) — no escalation yet.
 - [ ] Scrape **one real public article** via `curl_cffi.AsyncSession` with a profile whose impersonate target matches the installed Chrome.

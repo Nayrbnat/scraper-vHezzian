@@ -17,6 +17,7 @@ scrapeforge/
 │
 ├── core/                           # === INFRASTRUCTURE LAYER ===
 │   ├── __init__.py
+│   ├── models.py                   # Core dataclasses: Article, ScrapeResult, BrowserProfile, ProxySession, StorageState (SPEC §2)
 │   ├── engine.py                   # ScrapeEngine: thin orchestrator — routes via registry, coordinates collaborators
 │   ├── registry.py                 # ScraperRegistry: @register_scraper decorator + get_scraper_for (no central dict)
 │   ├── stealth_bridge.py           # StealthBridge: unified ASYNC driver interface (4 backends)
@@ -155,6 +156,7 @@ scrapeforge/
 
 | File | What It Does | Who Uses It | Add/Remove? |
 |------|-------------|-------------|-------------|
+| `core/models.py` | Core data structures (frozen dataclasses): `Article`, `ScrapeResult`, `BrowserProfile`, `ProxySession`, `StorageState` (SPEC §2) | Everything | **Core — never remove** |
 | `core/engine.py` | Thin orchestrator: routes URLs to scrapers (via registry) and coordinates collaborators (rate limiter, circuit breaker, proxy rotator, sink) | CLI, batch scripts | **Core — never remove** |
 | `core/registry.py` | `@register_scraper` decorator + `get_scraper_for(domain)`; scrapers self-register (conflict-free extension point) | Engine, all scrapers | **Core — never remove** |
 | `core/stealth_bridge.py` | Unified interface over 4 drivers. All scrapers talk here. | All scrapers, SSOHandler | **Core — never remove** |
