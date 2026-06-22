@@ -1,0 +1,14 @@
+{
+  "id": "dee",
+  "name": "Dee",
+  "email": "nayrbnat@gmail.com",
+  "created_at": "2026-06-22T00:00:00Z",
+  "preferences": {
+    "portfolio_companies": ["Anthropic", "Stripe", "OpenAI"],
+    "investment_themes": ["AI infrastructure", "fintech", "defense tech"],
+    "news_topics": ["funding rounds", "M&A", "regulation"],
+    "data_types": ["news"],
+    "cadence": "daily",
+    "max_items_per_section": 5
+  }
+}
