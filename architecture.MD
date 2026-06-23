@@ -39,9 +39,16 @@ scrapeforge/
 │   │   └── nodriver_driver.py      # NodriverDriver: direct CDP WebSocket (nuclear option)
 │   ├── db/                         # === DATASTORE (shared by ingestion + serving) ===
 │   │   ├── __init__.py
-│   │   ├── models.py               # SQLAlchemy 2.0 async: articles, jobs, sources (+ pgvector embedding)
+│   │   ├── models.py               # SQLAlchemy 2.0 async: articles, jobs, sources (+ pgvector embedding; Phase-2 relevance+summary)
 │   │   ├── session.py             # async engine + sessionmaker (DATABASE_URL)
-│   │   └── repositories.py        # query helpers used by the API (filters, pagination)
+│   │   ├── repositories.py        # query helpers used by the API (filters, pagination)
+│   │   └── migrations.py          # idempotent ADD COLUMN IF NOT EXISTS helper (Phase-2 columns; called at summarizer startup)
+│   ├── llm/                        # === LLM SUMMARIZATION PORT (Phase 2) ===
+│   │   ├── __init__.py
+│   │   ├── base.py                 # Summarizer ABC + SummaryResult frozen dataclass
+│   │   ├── openai_compatible.py    # OpenAICompatibleSummarizer: httpx adapter (GLM-4.5-Flash default; any OpenAI-compat base URL)
+│   │   ├── settings.py             # SummarizerSettings per-module fragment (SUMMARY_* env vars; never extends core Settings)
+│   │   └── exceptions.py          # LLMError, LLMRateLimitError, LLMParseError
 │   ├── queue/                      # === MESSAGE QUEUE PORT (+ adapters) ===
 │   │   ├── base.py                 # MessageQueue ABC (publish/reserve/ack/requeue/dead_letter; consume_once)
 │   │   ├── memory.py               # InMemoryMessageQueue (fake + local single-process)
@@ -74,6 +81,8 @@ scrapeforge/
 │   ├── run_scraper.py              # deployment entry point (drain loop) — python -m scrapeforge.worker.run_scraper
 │   ├── run_transform.py            # deployment entry point (drain loop)
 │   ├── run_community_ingest.py     # deployment entry point (drain loop) — python -m scrapeforge.worker.run_community_ingest
+│   ├── summarize_worker.py         # Phase 2: batch SELECT WHERE summary IS NULL → LLM → UPDATE relevance+summary
+│   ├── run_summarize.py            # deployment entry point (poll loop) — python -m scrapeforge.worker.run_summarize
 │   └── run_scheduler.py            # deployment entry point (cron loop)
 │
 ├── migrations/                     # Alembic migrations (versioned schema)
@@ -181,6 +190,13 @@ scrapeforge/
 | `core/circuit_breaker.py` | Reactive per-domain pause policy (failure counting, pause windows); `allow()`/`record()` | Engine | **Core — never remove** |
 | `core/storage/` | `ArticleSink` seam (`base.py`) + backends (`jsonl.py`, `postgres.py`): dedup, resume, RAG-ready output | Engine, scrapers, CLI, workers | **Core — keep** |
 | `core/db/` | SQLAlchemy async models (articles/jobs/sources) + session + repositories | API, workers, `PostgresSink` | **Core (serving) — keep** |
+| `core/db/migrations.py` | Idempotent `ADD COLUMN IF NOT EXISTS` helper; called at summarizer startup to self-heal production Postgres without Alembic | `run_summarize.py` | **Phase 2 — keep** |
+| `core/llm/base.py` | `Summarizer` ABC + `SummaryResult` frozen dataclass | `summarize_worker.py`, tests | **Phase 2 — keep** |
+| `core/llm/openai_compatible.py` | `OpenAICompatibleSummarizer`: httpx POST to any OpenAI-compatible endpoint; lenient JSON parse; retry on 429 | `summarize_worker.py` | **Phase 2 — keep** |
+| `core/llm/settings.py` | `SummarizerSettings`: per-module `BaseSettings` fragment reading `SUMMARY_*` env vars; `portfolio()` / `interests()` CSV helpers | `run_summarize.py` | **Phase 2 — keep** |
+| `core/llm/exceptions.py` | `LLMError`, `LLMRateLimitError`, `LLMParseError` — subclass `ScrapeForgeError`; never edit `exceptions.py` | `openai_compatible.py`, worker | **Phase 2 — keep** |
+| `worker/summarize_worker.py` | Phase 2 batch worker: `SELECT WHERE summary IS NULL` → LLM call → `UPDATE relevance+summary`; rate-limit stops run; parse errors skip row | Postgres, `core/llm/` | **Phase 2 — keep** |
+| `worker/run_summarize.py` | Deployment entry point for summarizer poll loop (`python -m scrapeforge.worker.run_summarize`); calls migrations at startup | ops | **Phase 2 — keep** |
 | `api/` | FastAPI serving plane: read + enqueue only; never drives a browser | external clients | **Serving — keep** |
 | `worker/` | arq workers + scheduler: consume jobs → `ScrapeEngine` → `PostgresSink` | queue | **Ingestion — keep** |
 | `deployment/` | Docker Compose + Dockerfiles + Caddy (single-VPS host) | ops | **Infra — keep** |
@@ -536,6 +552,17 @@ scrapers (Substack; later Reddit) produce complete `Article`s at fetch time, so 
 HTML-selector transform stage adds nothing and cannot parse their JSON-sourced fields.
 Queues: `JOB` (single-URL HTML) · `RESULTS` (HTML transform output) · `INGEST` (community publications).
 
+**Summarization (Phase 2).** `summarize_worker` is an independent post-ingest enrichment loop
+— it is not part of the scraper→transform pipeline at all. The worker polls
+`articles WHERE summary IS NULL` (ordered newest-first), calls the `Summarizer` port
+(`core/llm/openai_compatible.py`; default: free Zhipu GLM-4.5-Flash; swappable by
+`SUMMARY_API_*` env vars with no code change), and writes `relevance` (INT, 1–10, indexed) +
+`summary` (JSONB: 5 bullets, 5 sub-scores, reason, model, generated\_at) back to the same
+Postgres row. Rate-limit 429s stop the current run; LLM parse errors skip the row (marking it
+to avoid re-queuing permanently-broken articles). `core/db/migrations.py` adds the two new
+columns idempotently at startup. Deployment: `python -m scrapeforge.worker.run_summarize`
+(separate `summarizer` service in `docker-compose.yml`).
+
 ### Endpoints
 
 | Method · Path | Auth | Purpose |
@@ -565,9 +592,14 @@ All data endpoints require an `X-API-Key` header (per-key rate-limited). Hosting
 ### 8.2 Environment Variables
 
 > These are the **core/shared** keys (read by `config/settings.py`). Feature-specific keys
-> (e.g. `REDDIT_*`, `SUBSTACK_*`, `PREMIUM_*`) live in **per-module settings fragments** inside their
+> (e.g. `REDDIT_*`, `SUBSTACK_*`, `PREMIUM_*`, `SUMMARY_*`) live in **per-module settings fragments** inside their
 > own package, not in the core `Settings` class — see `SPEC.md` §8. The runtime env is the union of the
 > core keys below plus whatever fragments are present; it is not one monolithic table.
+>
+> Phase-2 summarizer keys (`SUMMARY_API_KEY`, `SUMMARY_API_BASE_URL`, `SUMMARY_API_MODEL`,
+> `SUMMARY_API_TIMEOUT`, `SUMMARY_BATCH_SIZE`, `SUMMARY_PORTFOLIO`, `SUMMARY_INTERESTS`) are
+> documented in `SummarizerSettings` (`core/llm/settings.py`). `SUMMARY_API_KEY` is only ever in
+> `.env` (gitignored); an empty key causes the worker to idle with a warning rather than crash.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|

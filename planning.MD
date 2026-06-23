@@ -249,6 +249,42 @@ Only after this passes do we build the full proxy/humanize/escalation stack agai
 
 ---
 
+### AI Summaries + Relevance — Phase 2
+
+> ✅ **DELIVERED** (branch `feat/article-summaries`). Per-article AI summarization: each
+> article in Postgres is enriched with a 5-bullet investor summary and a 1–10 relevance score
+> in a single LLM call (one call = one `UPDATE`). Built TDD:
+>
+> - **`core/llm/` port** (`base.py`, `openai_compatible.py`, `settings.py`, `exceptions.py`):
+>   provider-agnostic `Summarizer` ABC + `SummaryResult` frozen dataclass; default adapter is
+>   `OpenAICompatibleSummarizer` (httpx, JSON parse with lenient fallback, 429-retry stop,
+>   1–10 clamping). Default LLM: **Zhipu GLM-4.5-Flash (free tier)**; swap by changing
+>   `SUMMARY_API_*` env vars — no code change required.
+> - **`SummarizerSettings`** (`core/llm/settings.py`): per-module `BaseSettings` fragment
+>   (never extends core `Settings`); reads `SUMMARY_API_KEY` / `SUMMARY_API_BASE_URL` /
+>   `SUMMARY_API_MODEL` / `SUMMARY_API_TIMEOUT` / `SUMMARY_BATCH_SIZE` / `SUMMARY_PORTFOLIO` /
+>   `SUMMARY_INTERESTS` from `.env`. Key is never committed or logged.
+> - **New `Article` columns**: `relevance INTEGER` (indexed, nullable, 1–10) and
+>   `summary JSONB` (nullable; `{bullets, scores, reason, model, generated_at}`). Added via
+>   `core/db/migrations.py` — idempotent `ADD COLUMN IF NOT EXISTS`, no Alembic dependency.
+> - **`worker/summarize_worker.py`**: `summarize_pending()` batch cycle — `SELECT WHERE summary
+>   IS NULL` → LLM call → `UPDATE`. Parse errors skip the row; rate-limit 429 stops the run.
+>   `run_summarize_worker()` drains all pending in successive batches.
+> - **`worker/run_summarize.py`**: deployment entry point (`python -m
+>   scrapeforge.worker.run_summarize`), mirrors `run_transform.py`, calls migrations at startup.
+> - **Compose service**: `summarizer` service added to `deployment/docker-compose.yml`.
+> - **Invariant #18 carve-out documented** in SPEC.md §9: the summarizer (like community
+>   ingest) is an explicit carve-out — it is a direct batch read-modify-write over Postgres,
+>   not on the scraper→transform claim-check path.
+>
+> **Next phases:**
+> - **Phase 2.5 — Digest rendering:** the daily digest renders `summary.bullets` and sorts
+>   articles by `relevance DESC` so the most actionable news appears first.
+> - **Phase 4 — Swipe UI:** the API exposes `relevance` + `summary` fields; the swipe-style
+>   brief UI consumes them to present one card per article, pre-ranked for the owner.
+
+---
+
 ## 4. Phase 4: Bucket 1 — Premium News Paywalls
 **Goal:** The hardest bucket. Bloomberg, FT, WSJ, Economist.
 **Duration:** 5–7 days  
@@ -555,6 +591,7 @@ auth/StateStore (Phase 4) for gated sources; embeddings (Phase 8) for semantic r
 | Phase 2: Bucket 3 | 2–3 days | Day 9 | Public news scraper, CLI v1 |
 | Phase 3: Bucket 2 | 3–4 days | Day 12 | Reddit, Substack, WSO scrapers |
 | Phase 3.6: Community ingestion Phase 1 | ✅ delivered | — | Lean scheduled ingestion of 50 curated Substacks → Postgres via INGEST queue; next: AI summaries → ranking → brief UI |
+| AI Summaries + Relevance (Phase 2) | ✅ delivered | — | `core/llm/` port + GLM-4.5-Flash adapter; `relevance` INT + `summary` JSONB columns; batch summarize worker; idempotent migrations; next: Phase 2.5 digest rendering → Phase 4 swipe UI |
 | Phase 4: Bucket 1 | 5–7 days | Day 19 | Premium paywall scraper, auth system |
 | Phase 5: Integration | 3–4 days | Day 23 | Engine, docs, performance, final QA |
 | Phase 6: Serving API & Datastore | 4–6 days | Day 29 | Postgres, PostgresSink, FastAPI read+jobs, workers |
