@@ -63,15 +63,21 @@ async def enqueue_due_sources(
     For each enabled ``Source``:
     1. Generate a unique ``job_id`` (``uuid.uuid4().hex``).
     2. Persist a ``Job`` row via ``create_job`` (status ``'queued'``).
-    3. Publish a ``JobMessage`` to ``settings.JOB_QUEUE``.
+    3. Route by ``source.params['platform']``:
+       - **set** (community *publication* source) → publish an ``IngestMessage`` to
+         ``settings.INGEST_QUEUE`` for the community-ingest worker, which scrapes the
+         whole publication via ``scrape_publication``.
+       - **absent** (single-URL source) → publish a ``JobMessage`` to
+         ``settings.JOB_QUEUE`` for the scraper worker (unchanged behaviour).
 
-    The ``url`` field of the published message is ``source.params.get("url")``
-    when present, falling back to ``source.name`` when absent.
+    The target/``url`` of the published message is ``source.params.get("url")`` when
+    present, falling back to ``source.name`` when absent.
 
     Args:
         session_factory: ``async_sessionmaker`` bound to the target database.
         queue:           ``MessageQueue`` backend to publish jobs onto.
-        settings:        Settings-like object exposing ``JOB_QUEUE: str``.
+        settings:        Settings-like object exposing ``JOB_QUEUE`` and
+                         ``INGEST_QUEUE`` (``str``).
 
     Returns:
         Number of jobs enqueued (== number of enabled sources found).
