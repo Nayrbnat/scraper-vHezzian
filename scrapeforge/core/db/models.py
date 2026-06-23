@@ -91,7 +91,7 @@ class Article(Base):
     relevance: Mapped[int | None] = mapped_column(index=True, nullable=True)
     """AI relevance-to-owner score 1-10 (NULL until scored). Indexed for 'top by relevance'."""
 
-    summary: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    summary: Mapped[dict | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     """{bullets, scores, reason, model, generated_at}. NULL until summarized (Phase 2)."""
 
 
