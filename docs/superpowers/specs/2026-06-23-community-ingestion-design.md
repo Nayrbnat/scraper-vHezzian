@@ -126,9 +126,13 @@ Each unit lists **responsibility / interface / dependencies**.
 
 ## 5. Dedup & idempotency
 
-Two independent guards: `PostgresSink.seen(url)` skips already-ingested posts (no re-fetch / no
-re-write), and the UPSERT on `sha256(url)` is the safety net if two runs race. Re-running the
-whole chain yields **zero duplicate rows**. Raw archive PUT is deterministic (same key per url).
+Idempotency rests on the **UPSERT on `sha256(url)`**: re-running yields **zero duplicate rows**,
+and raw PUTs are deterministic (same key per url, overwritten in place). Within a single run,
+`PostgresSink.seen(url)` skips duplicate URLs the scraper returns. Across runs `seen()` starts
+empty (in-process only, by design — see its docstring), so a daily run re-fetches and re-UPSERTs
+the recent in-window posts: correct, but not minimal. Avoiding re-fetch of already-ingested posts
+(a discovery-stage `exists`/DB pre-check) is a deliberate **deferred optimization**; at Phase-1
+volumes (≤ 25 newest posts × 50 publications, rate-limited) the re-fetch cost is acceptable.
 
 ## 6. Error handling
 
@@ -166,10 +170,10 @@ INGEST queue + community-ingest stage.
 3. `@db` tests pass in CI against the pgvector service container.
 4. `docker compose config` parses with the `community-ingest` service.
 5. **Hermetic end-to-end:** seed 1–2 sources → `enqueue_due_sources` → ingest worker (scraper
-   mocked to return 2 articles, real object-store fake + ephemeral PG) → `GET /articles` returns
-   the community articles **with titles/authors/dates**; re-running the job produces **no
-   duplicate** (idempotency); a soft-block/paywalled scrape result yields **no** structured row
-   and a Job `error`.
+   mocked to return 2 success articles + 1 paywalled error, real object-store fake + ephemeral
+   PG) → `repositories.query_articles(bucket="community")` returns the articles **with
+   titles/authors/dates** and the paywalled one is **absent**; re-running produces **no
+   duplicate** rows (idempotency). (`GET /articles` is covered by the existing API tests.)
 6. CI green on the PR; SPEC/architecture/planning/docs updated; memory updated. Never push main.
 
 ## 9. Out of scope (later phases, per the agreed sequencing)
