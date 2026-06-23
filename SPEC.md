@@ -1664,3 +1664,12 @@ class RedditSettings(BaseSettings):
       (pgvector) are generated in the transform layer only when semantic search is enabled.
     Rationale: raw is the expensive artifact (a residential-proxy request + block risk), so it is made
     durable the instant it is fetched — enabling reprocessing without re-scraping.
+
+    **Community/JSON scrapers carve-out (Phase 1).** The scraper→transform claim-check split
+    (stateless scraper writes raw + publishes a pointer; the transform worker is the sole
+    structured writer) governs **public-bucket HTML**. Fully-parsing community scrapers (Substack;
+    later Reddit) persist structured rows **within their ingestion worker**
+    (`worker/community_ingest_worker.py`) via `PostgresSink`, while still archiving raw to the
+    object store for claim-check/replay. Rationale: these scrapers produce complete `Article`s at
+    fetch time, so a separate HTML-selector transform stage adds nothing and cannot parse their
+    JSON-sourced fields. The scheduler routes such sources to the `INGEST` queue.

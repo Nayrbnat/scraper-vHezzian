@@ -66,12 +66,14 @@ scrapeforge/
 │
 ├── worker/                         # === INGESTION PIPELINE WORKERS ===
 │   ├── __init__.py
-│   ├── messages.py                 # shared JobMessage / ResultPointer contracts + raw_object_key
+│   ├── messages.py                 # shared JobMessage / IngestMessage / ResultPointer contracts + raw_object_key
 │   ├── scraper_worker.py           # stateless: fetch → archive RAW (claim-check) → publish pointer
 │   ├── transform_worker.py         # idempotent: read raw → normalize → UPSERT (sole structured writer)
-│   ├── scheduler.py                # enqueue_due_sources: recurring scrapes per Source
+│   ├── community_ingest_worker.py  # community publications: scrape_publication → archive raw → PostgresSink (Invariant #18 carve-out)
+│   ├── scheduler.py                # enqueue_due_sources: recurring scrapes per Source (routes platform Sources to INGEST queue)
 │   ├── run_scraper.py              # deployment entry point (drain loop) — python -m scrapeforge.worker.run_scraper
 │   ├── run_transform.py            # deployment entry point (drain loop)
+│   ├── run_community_ingest.py     # deployment entry point (drain loop) — python -m scrapeforge.worker.run_community_ingest
 │   └── run_scheduler.py            # deployment entry point (cron loop)
 │
 ├── migrations/                     # Alembic migrations (versioned schema)
@@ -525,6 +527,14 @@ is stateless w.r.t. the serving DB — it archives the RAW payload to the object
 pointer; it NEVER writes Postgres. The **transform worker** is the sole writer of structured data + Job
 status (idempotent UPSERT by `sha256(url)`). Queue + object store sit behind ports (`MessageQueue`,
 `ObjectStore`) so cloud adapters slot in by addition. See SPEC §9 Invariant #18 for the full rule.
+
+**Community ingestion (Phase 1).** `scheduler` routes `Source` rows carrying `params.platform`
+to the `INGEST` queue; `community_ingest_worker` runs the bucket scraper's `scrape_publication`,
+archives each new post's raw payload (claim-check), and UPSERTs parsed rows via `PostgresSink`
+(idempotent). This is an explicit carve-out from Invariant #18: fully-parsing community/JSON
+scrapers (Substack; later Reddit) produce complete `Article`s at fetch time, so a separate
+HTML-selector transform stage adds nothing and cannot parse their JSON-sourced fields.
+Queues: `JOB` (single-URL HTML) · `RESULTS` (HTML transform output) · `INGEST` (community publications).
 
 ### Endpoints
 
