@@ -1,4 +1,4 @@
-# Design — Phase 2: per-article AI 5-bullet summaries
+# Design — Phase 2: per-article AI 5-bullet summary + relevance score
 
 - **Date:** 2026-06-23
 - **Status:** approved (brainstorming → spec)
@@ -10,171 +10,206 @@
 Phase 1 lands parsed Substack articles in the `articles` table (`id=sha256(url)`,
 `title/content/author/publish_date/bucket/meta JSONB`, `embedding Vector(1536) NULL`).
 
-**Goal:** every article gets a stored **5-bullet "is this worth my time?" summary**, generated
-by a cheap **non-Claude** model (default: the **free Zhipu GLM-4.5-Flash**), behind a
-provider-agnostic port so the model is a `.env` swap (DeepSeek / Qwen — all OpenAI-compatible).
-Summaries are produced by a **batch worker** and stored on the article, ready for the future
-swipe UI and (Phase 2.5) the email digest.
+**Goal:** in **one** cheap LLM call per article, produce both:
+1. a **5-bullet "is this worth my time?" summary**, and
+2. a **relevance score 1–10** ("relevance to *you*"), synthesized from five named criteria,
 
-**User constraints:** do NOT use Claude/Anthropic. Use a Chinese ultra-cheap/free API. Cost must
-be "practically free" — the free GLM-4.5-Flash tier achieves $0/day within its rate limits.
+stored on the article and ready for the future swipe UI (rank by relevance) and the Phase-2.5
+digest. The model is the **free Zhipu GLM-4.5-Flash** by default, behind a provider-agnostic
+OpenAI-compatible port so it's a `.env` swap (DeepSeek / Qwen).
 
-## 2. Decisions (all confirmed in brainstorming)
+**User constraints:** no Claude/Anthropic; Chinese ultra-cheap/free API; "practically free"
+(GLM-4.5-Flash free tier = $0/day within rate limits).
+
+## 2. The relevance score (1–10)
+
+The model returns a per-criterion breakdown **and** a holistic overall. The five criteria
+(verbatim intent from the owner):
+
+| # | Criterion (`key`) | What scores high |
+|---|---|---|
+| 1 | `relevance` | Related to AI, finance, the owner's **portfolio companies**, or **secular industry changes**. |
+| 2 | `credibility` | Written by a famous/respected Substack or a **leading AI researcher**. |
+| 3 | `intensity` | Significance of the event — **fundraising, new investment, collaboration, technological breakthrough** rank high. |
+| 4 | `personal` | Matches the owner's **specifically stated interests**, including niche ones (e.g. "hybrid bonding"). |
+| 5 | `time` | **Time-sensitivity / urgency** — imminent events (e.g. "SpaceX IPO in 3 days") rank high. |
+
+- **Overall** `relevance` (1–10): the model's holistic weighting of the five for *this* owner.
+- **Personalization input:** the owner's portfolio + interests, supplied via config (§3.3) and
+  injected into the prompt. The score is therefore "relevance to the owner" — correct while the
+  system is single-user; a per-(article, user) table is the multi-user follow-up (§9).
+
+## 3. Decisions (confirmed in brainstorming)
 
 | Decision | Choice |
 |---|---|
-| Provider (default) | **Zhipu GLM-4.5-Flash** (free), via an OpenAI-compatible port → swappable by config |
-| Trigger | **Batch worker**: `SELECT … WHERE summary IS NULL`, rate-limit paced, idempotent, backfills |
-| Storage | New nullable **`summary` JSONB column** on `articles`: `{bullets: [5], model, generated_at}` |
-| Cadence | The summarizer is **its own background worker** (own poll loop + compose service) |
-| Digest integration | **Out of scope for Phase 2** — it's Phase 2.5 (digest needs a Postgres source + async plumbing) |
+| Provider (default) | **Zhipu GLM-4.5-Flash** (free), OpenAI-compatible port → swappable by config |
+| Trigger | **Batch worker**: `WHERE summary IS NULL`, rate-limit paced, idempotent, backfills |
+| Summary storage | New nullable **`summary` JSONB** on `articles`: `{bullets, scores, reason, model, generated_at}` |
+| Score storage | New nullable **`relevance` INT** column (1–10, indexed) — the headline, queryable/sortable |
+| One call | Bullets + scores + overall + reason returned by a **single** chat-completion request |
+| Cadence | Summarizer is **its own background worker** (own poll loop + compose service) |
+| Digest integration | **Out of scope** — Phase 2.5 (digest needs a Postgres source + async plumbing) |
 
-## 3. Components (each one responsibility / interface / deps)
+## 4. Components (each: responsibility / interface / deps)
 
-### 3.1 `core/llm/base.py` — the `Summarizer` port
-- **Responsibility:** the boundary the worker depends on; hides the provider.
-- **Interface:**
-  ```python
-  @dataclass(frozen=True, slots=True)
-  class SummaryResult:
-      bullets: list[str]   # 3–5 non-empty bullets (target 5; validated by the adapter)
-      model: str
-
-  class Summarizer(ABC):
-      @abstractmethod
-      async def summarize(self, *, title: str, content: str) -> SummaryResult: ...
-  ```
-- **Deps:** none (pure ABC + dataclass). Mockable with a fake in tests.
-
-### 3.2 `core/llm/openai_compatible.py` — `OpenAICompatibleSummarizer(Summarizer)`
-- **Responsibility:** translate one `summarize` call into an OpenAI-compatible
-  `POST {base_url}/chat/completions` and parse the reply into 5 bullets.
-- **Behaviour:** async `httpx` client; sends a system + user message (see §4) asking for a JSON
-  **object** `{"bullets": [...]}` (compatible with `response_format={"type":"json_object"}` when
-  the provider supports it; harmless otherwise). Parse: `json.loads(...)["bullets"]` first;
-  **fallback** to line-parsing the raw text (strip `-`/`*`/`1.` markers). Normalize: drop empty
-  bullets, keep the first 5; require **≥ 3** usable bullets else raise `LLMParseError`. Map HTTP
-  429 / timeouts → bounded retry with backoff, then raise `LLMRateLimitError`; other non-2xx →
-  `LLMError`. No secrets logged.
-- **Deps:** `httpx` (already a dep), `SummarizerSettings`, the `LLMError` hierarchy.
-
-### 3.3 `core/llm/settings.py` — `SummarizerSettings` (per-module fragment)
-- Per-module `BaseSettings` (NOT core `Settings`, per Invariant #16). Reads the same `.env`.
-- Fields:
-  - `SUMMARY_API_BASE_URL: str = "https://api.z.ai/api/paas/v4"` (z.ai OpenAI-compatible base —
-    **verify the exact base/path against current z.ai docs at build time**; it is config-driven).
-  - `SUMMARY_API_KEY: str = ""` (secret; `.env` only; empty ⇒ worker no-ops with a clear warning).
-  - `SUMMARY_MODEL: str = "glm-4.5-flash"`.
-  - `SUMMARY_BATCH_SIZE: int = 20` (max articles per worker run).
-  - `SUMMARY_MAX_INPUT_CHARS: int = 12000` (truncate long article bodies before sending).
-  - `SUMMARY_REQUEST_TIMEOUT: float = 30.0`.
-  - `SUMMARY_INTER_REQUEST_DELAY: float = 1.0` (politeness/pacing between calls).
-
-### 3.4 `core/llm/exceptions.py` — typed errors
-`LLMError(ScrapeForgeError)`; `LLMRateLimitError(LLMError)`; `LLMParseError(LLMError)`. No bare
-excepts anywhere.
-
-### 3.5 `core/db/models.py` — `summary` column (additive)
-Add to `Article`:
+### 4.1 `core/llm/base.py` — the `Summarizer` port
 ```python
-summary: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-"""AI 5-bullet summary: {bullets: list[str], model: str, generated_at: ISO-8601}. NULL until summarized."""
+@dataclass(frozen=True, slots=True)
+class SummaryResult:
+    bullets: list[str]            # 3–5 non-empty bullets (target 5)
+    relevance: int                # overall 1–10
+    scores: dict[str, int]        # {relevance,credibility,intensity,personal,time} each 1–10
+    reason: str                   # one-line "why this score"
+    model: str
+
+class Summarizer(ABC):
+    @abstractmethod
+    async def summarize(self, *, title: str, content: str, published: datetime | None,
+                        portfolio: list[str], interests: list[str]) -> SummaryResult: ...
 ```
-Plus an **Alembic migration** (`ALTER TABLE articles ADD COLUMN summary JSONB`). `@db` tests use
-`create_all`, so the column appears automatically in tests; the migration is for production.
+Pure ABC + dataclass; mockable with a fake in tests.
 
-### 3.6 `worker/summarize_worker.py` — the batch worker
-- **Responsibility:** summarize a batch of un-summarized articles.
-- **Interface:**
-  - `async def summarize_pending(*, session_factory, summarizer: Summarizer, settings) -> int`
-    — returns the number of articles summarized this run.
-  - `async def run_summarize_worker(*, session_factory, summarizer, settings) -> None`
-    — poll loop wrapper (drain one batch, sleep, repeat) for the deployment entry.
+### 4.2 `core/llm/openai_compatible.py` — `OpenAICompatibleSummarizer(Summarizer)`
+- Async `httpx` `POST {base_url}/chat/completions`; sends the system + user messages (§5) asking
+  for a **JSON object** (compatible with `response_format={"type":"json_object"}` when supported,
+  harmless otherwise): `{"bullets":[...], "scores":{...}, "relevance":n, "reason":"..."}`.
+- Parse `json.loads`; **fallback** to lenient extraction if the body has stray prose around the
+  JSON (regex the first `{...}`); then validate/normalize (§4.4). Map HTTP 429 / timeouts →
+  bounded retry+backoff → `LLMRateLimitError`; other non-2xx → `LLMError`. **Never logs the key.**
+- Deps: `httpx` (already a dep), `SummarizerSettings`, the `LLMError` hierarchy.
+
+### 4.3 `core/llm/settings.py` — `SummarizerSettings` (per-module fragment)
+Per-module `BaseSettings` (NOT core `Settings`; Invariant #16). Reads the same `.env`:
+- `SUMMARY_API_BASE_URL: str = "https://api.z.ai/api/paas/v4"` (z.ai OpenAI-compatible base —
+  **verify the exact base/path against current z.ai docs at build time**; config-driven).
+- `SUMMARY_API_KEY: str = ""` (secret; `.env` only; empty ⇒ worker no-ops with a clear warning).
+- `SUMMARY_MODEL: str = "glm-4.5-flash"`.
+- `SUMMARY_PORTFOLIO: str = ""` (CSV → list; e.g. `"Nvidia,TSMC,Anthropic"`) — criterion #1.
+- `SUMMARY_INTERESTS: str = ""` (CSV → list; e.g. `"hybrid bonding,advanced packaging,SpaceX IPO"`) — criterion #4.
+- `SUMMARY_BATCH_SIZE: int = 20`; `SUMMARY_MAX_INPUT_CHARS: int = 12000`;
+  `SUMMARY_REQUEST_TIMEOUT: float = 30.0`; `SUMMARY_INTER_REQUEST_DELAY: float = 1.0`.
+- Helpers `portfolio()` / `interests()` parse the CSVs (trim, drop blanks) — mirrors the existing
+  `SubstackSettings.custom_domains()` pattern.
+
+### 4.4 `core/llm/exceptions.py` — typed errors
+`LLMError(ScrapeForgeError)`; `LLMRateLimitError(LLMError)`; `LLMParseError(LLMError)`.
+**Validation/normalize** (in the adapter): bullets → drop empties, keep first 5, require ≥ 3;
+each sub-score coerced to int and **clamped to 1–10**; overall `relevance` coerced+clamped 1–10;
+`reason` non-empty (fallback `""`). If bullets < 3 or required keys missing → `LLMParseError`.
+
+### 4.5 `core/db/models.py` — new columns (additive)
+```python
+relevance: Mapped[int | None] = mapped_column(index=True, nullable=True)
+"""Overall AI relevance score 1–10 (NULL until scored). Indexed for 'top by relevance'."""
+summary: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+"""{bullets: list[str], scores: dict, reason: str, model: str, generated_at: ISO-8601}. NULL until summarized."""
+```
+One **Alembic migration** adds both columns. `@db` tests use `create_all`, so the columns appear
+automatically in tests; the migration is for production.
+
+### 4.6 `worker/summarize_worker.py` — the batch worker
+- `async def summarize_pending(*, session_factory, summarizer, settings) -> int` — returns the
+  count summarized this run.
+- `async def run_summarize_worker(*, session_factory, summarizer, settings) -> None` — poll loop.
 - **Behaviour:** `SELECT * FROM articles WHERE summary IS NULL ORDER BY fetched_at DESC LIMIT
-  SUMMARY_BATCH_SIZE` (query inlined here, not in `repositories.py`). For each row: build the
-  prompt from `title` + truncated `content`; `await summarizer.summarize(...)`; on success
-  `UPDATE articles SET summary = {bullets, model, generated_at=now(UTC)} WHERE id = …`; count++.
-  **Pacing/errors:** sleep `SUMMARY_INTER_REQUEST_DELAY` between calls; on `LLMRateLimitError`
-  **stop the run** (leave the rest NULL → next tick resumes); on `LLMParseError`/other per-article
-  error, **log and skip** that article (stays NULL → retried later), do not abort the batch.
-- **Deps:** `session_factory`, an injected `Summarizer`, `SummarizerSettings`.
+  SUMMARY_BATCH_SIZE` (query inlined here, not in `repositories.py`). For each row:
+  `await summarizer.summarize(title=…, content=…[:MAX_INPUT_CHARS], published=row.publish_date,
+  portfolio=settings.portfolio(), interests=settings.interests())`; on success
+  `UPDATE articles SET relevance = result.relevance, summary = {bullets, scores, reason, model,
+  generated_at=now(UTC)} WHERE id = …`; count++.
+- **Pacing/errors:** sleep `SUMMARY_INTER_REQUEST_DELAY` between calls; `LLMRateLimitError` →
+  **stop the run** (rest stay NULL → next tick); `LLMParseError`/other per-article error → **log
+  and skip** (row stays NULL → retried), never abort the batch.
+- Deps: `session_factory`, an injected `Summarizer`, `SummarizerSettings`.
 
-### 3.7 `worker/run_summarize.py` + deployment
-- Entry point mirroring `run_transform.py`: build `Settings`/`SummarizerSettings`, construct the
-  `OpenAICompatibleSummarizer`, `make_sessionmaker`, run `run_summarize_worker` in a poll loop.
-  If `SUMMARY_API_KEY` is empty, log a clear warning and idle (don't crash-loop).
-- `deployment/docker-compose.yml`: add a `summarizer` service (Dockerfile.api, depends_on
-  postgres; needs `SUMMARY_*` env). `docker compose config` must parse.
+### 4.7 `worker/run_summarize.py` + deployment
+- Entry mirroring `run_transform.py`: build settings, construct `OpenAICompatibleSummarizer`,
+  `make_sessionmaker`, run the poll loop. Empty `SUMMARY_API_KEY` → clear warning + idle (no
+  crash-loop). Add a `summarizer` service to `deployment/docker-compose.yml` (Dockerfile.api,
+  depends_on postgres, `SUMMARY_*` env). `docker compose config` must parse.
 
-## 4. Prompt (investor "worth my time?" focus)
+## 5. Prompt (one call → bullets + scores)
 
-System: *"You are an equity analyst writing for a busy investor. Read the article and output
-exactly 5 short bullets (≤ 25 words each) that let the reader decide if it's worth their time:
-(1) the core claim/thesis, (2) the company/ticker or sector in focus, (3) the key number,
-catalyst, or data point, (4) the bull or bear angle / what's contrarian, (5) why it matters for
-an investment decision. Return ONLY a JSON object of the form
-{"bullets": ["…","…","…","…","…"]} with exactly 5 strings."*
+**System:** *"You are an equity analyst scoring and summarizing articles for a specific investor.
+The investor's portfolio: {portfolio}. The investor's stated interests (including niche topics):
+{interests}. Today's date is {today}; the article was published {published}.*
 
-User: `Title: {title}\n\n{content[:SUMMARY_MAX_INPUT_CHARS]}`.
+*Produce: (a) exactly 5 short bullets (≤ 25 words each) capturing the core claim/thesis, the
+company/ticker or sector, the key number or catalyst, the bull/bear angle, and why it matters;
+(b) integer 1–10 sub-scores for: `relevance` (about AI, finance, the portfolio, or secular
+industry shifts), `credibility` (famous/respected Substack or leading researcher), `intensity`
+(fundraising / new investment / collaboration / technological breakthrough rank high), `personal`
+(matches the investor's stated interests, niche ones count), `time` (imminent/time-sensitive
+events rank high); (c) an overall `relevance` 1–10 weighing those for THIS investor; (d) a
+one-line `reason`. Return ONLY a JSON object: {"bullets":[5 strings], "scores":{"relevance":n,
+"credibility":n,"intensity":n,"personal":n,"time":n}, "relevance":n, "reason":"…"}."*
 
-Parse `obj["bullets"]` → strings; fallback to line-parsing; normalize to ≤ 5 (≥ 3 required).
+**User:** `Title: {title}\n\n{content[:SUMMARY_MAX_INPUT_CHARS]}`.
 
-## 5. Flow
+## 6. Flow
 
 ```
 articles (summary = NULL)  ← Phase-1 ingestion
         │
 summarizer worker (own poll loop)
    SELECT articles WHERE summary IS NULL  (LIMIT N, newest first)
-     per article: prompt(title + truncated content) → GLM-4.5-Flash → 5 bullets
-                  UPDATE article.summary = {bullets, model, generated_at}
+     per article: prompt(title+content, profile, dates) → GLM-4.5-Flash
+                  → {bullets[5], scores{5}, relevance, reason}  (one call)
+                  UPDATE article.relevance = n,
+                         article.summary   = {bullets, scores, reason, model, generated_at}
      429 → stop run (resume next tick) · parse/other error → skip (leave NULL)
         │
-Postgres (article.summary)  → future swipe UI · Phase-2.5 digest
+Postgres (article.relevance, article.summary)  → swipe UI (rank by relevance) · Phase-2.5 digest
 ```
 
-## 6. Idempotency & cost
+## 7. Idempotency & cost
 
-`WHERE summary IS NULL` makes every run summarize only the not-yet-done articles → re-running is a
-no-op once caught up, and it **backfills** the existing corpus for free. Summary is keyed to the
-immutable article (URL PK); no re-summarize on re-ingest. Cost: GLM-4.5-Flash free tier = **$0/day**
-within rate limits; if exceeded, switch `SUMMARY_*` env to DeepSeek (~cents/day) — no code change.
+`WHERE summary IS NULL` ⇒ each run scores only the not-yet-done articles; re-running is a no-op
+once caught up and **backfills** the existing corpus. Score+summary keyed to the immutable
+article (URL PK). Storing the sub-score breakdown means the overall can be **re-tuned later with
+our own weights without re-calling the model**. Cost: GLM-4.5-Flash free = **$0/day** within rate
+limits; exceed it → switch `SUMMARY_*` env to DeepSeek (~cents/day), no code change.
 
-## 7. Testing — Definition of Done (hermetic)
+## 8. Testing — Definition of Done (hermetic)
 
 1. `ruff check .` = 0; `ruff format --check .` clean.
 2. `pytest -m "not integration"` green incl. new unit/`@db` tests; coverage ≥ 80%:
-   - **adapter** (`OpenAICompatibleSummarizer`): with a mocked `httpx` transport — parses a JSON
-     array into 5 bullets; line-parse fallback works; HTTP 429 → retry then `LLMRateLimitError`;
-     malformed/empty → `LLMParseError`; never logs the API key. No live network.
-   - **port**: a `FakeSummarizer` honours the `Summarizer` contract.
-   - **worker** (`@db`): seed articles (some `summary` NULL, some already set) + a `FakeSummarizer`
-     → only-NULL get summarized; JSONB shape `{bullets,model,generated_at}` correct; `BATCH_SIZE`
-     respected; idempotent re-run = 0 new; a per-article `LLMParseError` leaves that row NULL and
-     does not abort the batch; an `LLMRateLimitError` stops the run leaving remaining NULL.
-   - **entry point** smoke: `run_summarize.main` is a coroutine; empty `SUMMARY_API_KEY` no-ops.
+   - **adapter:** mocked `httpx` → parses the JSON object into `bullets` + `scores` + `relevance`
+     + `reason`; sub-scores/overall **clamped to 1–10**; bullets normalized (≥ 3 else
+     `LLMParseError`); lenient-extraction fallback works; HTTP 429 → retry → `LLMRateLimitError`;
+     malformed/missing keys → `LLMParseError`; **API key never logged**. No live network.
+   - **settings:** `portfolio()`/`interests()` parse CSV (trim/blank-drop), empty ⇒ `[]`.
+   - **worker (`@db`):** seed articles (some `summary` NULL, some set) + a `FakeSummarizer` →
+     only-NULL get processed; **both** `relevance` (int 1–10) and `summary` JSONB
+     (`{bullets,scores,reason,model,generated_at}`) written; `BATCH_SIZE` respected; idempotent
+     re-run = 0 new; per-article `LLMParseError` leaves that row NULL without aborting the batch;
+     `LLMRateLimitError` stops the run leaving the rest NULL. Asserts the fake received the
+     `portfolio`/`interests`/`published` it was given.
+   - **entry-point smoke:** `run_summarize.main` is a coroutine; empty `SUMMARY_API_KEY` no-ops.
 3. `@db` tests pass in CI against the pgvector service container.
 4. `docker compose config` parses with the `summarizer` service.
-5. **Live `@integration`** (manual, needs the user's real key): one real GLM-4.5-Flash call over a
-   real article → returns 5 non-empty bullets; asserts shape, skips gracefully on missing key /
-   network error (never hard-fails CI — integration is manual only).
+5. **Live `@integration`** (manual, needs the owner's real key): one real GLM-4.5-Flash call on a
+   real article with a sample portfolio/interests → returns 3–5 non-empty bullets + a 1–10
+   relevance + 5 sub-scores; skips gracefully on missing key / network error (never fails CI).
 6. CI green on the PR; SPEC/architecture/planning updated; memory note added. Never push `main`.
 
-## 8. Seam compliance
+## 9. Seam compliance
 
 New files: `core/llm/{base,openai_compatible,settings,exceptions}.py`,
 `worker/{summarize_worker,run_summarize}.py`, an Alembic migration, tests. Additive edits: the
-`summary` column on `Article` (nullable, additive), a `summarizer` compose service. Config is a
-per-module `SummarizerSettings` fragment — **no edit to core `Settings`**. No edits to `engine.py`,
-`core/registry.py`, `repositories.py`, root `cli.py`, or the existing scraper/transform/ingest
-workers. `SUMMARY_API_KEY` lives only in `.env` (gitignored); CI never calls the live API.
+`relevance` + `summary` columns on `Article` (nullable, additive), a `summarizer` compose service.
+Config is a per-module `SummarizerSettings` fragment — **no edit to core `Settings`**. No edits to
+`engine.py`, `core/registry.py`, `repositories.py`, root `cli.py`, or the existing
+scraper/transform/ingest workers. `SUMMARY_API_KEY` lives only in `.env` (gitignored); CI never
+calls the live API.
 
-## 9. Out of scope (later phases)
+## 10. Out of scope (later phases)
 
-- **Phase 2.5:** wire summaries into the digest — add a Postgres source to `digest/service.py`
-  (it currently reads only `sample`/`jsonl:`), a `bullets` field on `DigestItem`, matcher +
-  renderer changes, and the async plumbing the sync digest needs.
-- **Phase 3:** AI relevance ranking ("what gets shown").
-- **Phase 4:** swipe UI + feedback loop.
-- Embeddings / semantic search (the `embedding` column stays NULL).
-- Re-summarization on content change; multi-version summaries; per-subscriber custom summaries.
+- **Phase 2.5:** wire summaries + relevance into the digest — a Postgres source for
+  `digest/service.py` (today it reads only `sample`/`jsonl:`), render the bullets, sort/threshold
+  by `relevance`, and unify the owner profile (portfolio/interests) across digest + scorer.
+- **Phase 3 → Phase 4:** the swipe UI + feedback loop (swipes re-tune the weighting / fine the
+  relevance signal). Per-(article, user) relevance for multi-user.
+- Embeddings / semantic relevance (the `embedding` column stays NULL).
+- Re-summarization on content change; multi-version summaries.
