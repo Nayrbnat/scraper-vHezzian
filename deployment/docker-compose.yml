@@ -70,6 +70,20 @@ services:
       minio: { condition: service_started }
     restart: unless-stopped
 
+  # --- Community-ingest worker: scrapes whole publications (the 50 Substacks) on the INGEST
+  #     queue and persists their parsed articles directly (Invariant #18 carve-out). No browser. ---
+  community-ingest:
+    build:
+      context: ..
+      dockerfile: deployment/Dockerfile.api
+    command: ["python", "-m", "scrapeforge.worker.run_community_ingest"]
+    environment: *app-env
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_started }
+      minio: { condition: service_started }
+    restart: unless-stopped
+
   # --- Scheduler: enqueues recurring scrapes per configured sources ("continuously populate"). ---
   scheduler:
     build:
