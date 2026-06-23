@@ -35,7 +35,7 @@ async def summarize_pending(
                 await session.execute(
                     select(Article)
                     .where(Article.summary.is_(None))
-                    .order_by(Article.fetched_at.asc(), Article.id.asc())
+                    .order_by(Article.fetched_at.desc(), Article.id.desc())
                     .limit(settings.SUMMARY_BATCH_SIZE)
                 )
             )

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import types
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
@@ -56,7 +56,7 @@ class _FakeSummarizer:
         )
 
 
-async def _add_article(session_factory, *, id_, title, summary=None):
+async def _add_article(session_factory, *, id_, title, summary=None, fetched_at=None):
     async with session_factory() as s:
         s.add(
             ArticleRow(
@@ -68,7 +68,7 @@ async def _add_article(session_factory, *, id_, title, summary=None):
                 content="Body.",
                 author=None,
                 publish_date=None,
-                fetched_at=datetime.now(UTC),
+                fetched_at=fetched_at if fetched_at is not None else datetime.now(UTC),
                 raw_key=None,
                 meta={},
                 summary=summary,
@@ -143,8 +143,13 @@ async def test_parse_error_skips_row_without_aborting(db_session, session_factor
 async def test_rate_limit_stops_run(db_session, session_factory) -> None:
     from scrapeforge.worker.summarize_worker import summarize_pending
 
-    await _add_article(session_factory, id_="a" * 64, title="RateLimited")
-    await _add_article(session_factory, id_="c" * 64, title="NeverReached")
+    # Pin explicit fetched_at so RateLimited is clearly the newest (processed first under
+    # newest-first ordering) and NeverReached is one hour older (processed second).
+    now = datetime.now(UTC)
+    await _add_article(session_factory, id_="a" * 64, title="RateLimited", fetched_at=now)
+    await _add_article(
+        session_factory, id_="c" * 64, title="NeverReached", fetched_at=now - timedelta(hours=1)
+    )
     fake = _FakeSummarizer(raise_on={"RateLimited"}, error=LLMRateLimitError("429"))
 
     n = await summarize_pending(
