@@ -16,16 +16,18 @@ it at and provides selection helpers the community CLI uses.
 
 How it is consumed
 ------------------
-These are *publication* hosts, not single-post URLs.  The working integration today is the
-community CLI ``scrape-substacks`` command, which drives ``SubstackScraper.scrape_publication``
-(offset-paginated archive discovery + per-post fetch) over the selected publications.
+These are *publication* hosts, not single-post URLs.  Two paths consume them:
 
-Recurring, scheduler-driven ingestion of *whole publications* needs a discovery/fan-out
-step (publication → N post URLs → N single-URL jobs) that the Phase-6 scraper worker does
-**not** have yet — its ``handle_scrape_job`` path is single-URL (``engine.scrape``).  So this
-module deliberately does **not** seed ``sources`` rows: doing so would enqueue bare hosts the
-single-post path can't scrape.  When the fan-out worker lands, a seed helper can be added
-here without touching this list.
+1. **On-demand CLI** — ``community scrape-substacks`` drives
+   ``SubstackScraper.scrape_publication`` (offset-paginated archive discovery + per-post
+   fetch) over the selected publications and writes results to a JSONL sink.
+
+2. **Scheduled ingestion** — ``seed_sources`` (bottom of this module) upserts the
+   curated list into the ``sources`` table as community ``Source`` rows with
+   ``params["platform"] = "substack"``.  The scheduler detects that field and routes
+   each source to the ``INGEST`` queue instead of the single-URL ``JOB`` queue.  The
+   ``community_ingest_worker`` then calls ``scrape_publication`` on each source, archives
+   raw payloads (claim-check), and persists parsed articles via ``PostgresSink``.
 
 Verification
 ------------
