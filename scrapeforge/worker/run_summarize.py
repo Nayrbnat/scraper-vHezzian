@@ -23,14 +23,17 @@ _POLL_INTERVAL_S = 60.0
 
 async def main() -> None:
     summarizer_settings = SummarizerSettings()
-    engine = make_engine(Settings().DATABASE_URL)
-    await ensure_summary_columns(engine)  # idempotent: self-heal the schema on existing DBs
-    session_factory = make_sessionmaker(engine)
 
+    # Key check FIRST — a keyless summarizer idles cleanly without touching the DB, so a
+    # misconfigured-but-keyless container never crash-loops on a schema/connectivity error.
     if not summarizer_settings.SUMMARY_API_KEY:
         log.warning("SUMMARY_API_KEY is empty — summarizer idle (set it in .env to enable).")
         while True:  # noqa: ASYNC110
             await asyncio.sleep(_POLL_INTERVAL_S)
+
+    engine = make_engine(Settings().DATABASE_URL)
+    await ensure_summary_columns(engine)  # idempotent: self-heal the schema on existing DBs
+    session_factory = make_sessionmaker(engine)
 
     summarizer = OpenAICompatibleSummarizer(summarizer_settings)
     while True:

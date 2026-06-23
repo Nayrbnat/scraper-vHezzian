@@ -71,7 +71,9 @@ services:
     restart: unless-stopped
 
   # --- Summarizer: scores + 5-bullet summaries for un-summarized articles via an OpenAI-
-  #     compatible LLM (default free GLM-4.5-Flash). Reads/writes Postgres only. ---
+  #     compatible LLM (default free GLM-4.5-Flash). Reads/writes Postgres only.
+  #     SINGLE INSTANCE ONLY — the `WHERE summary IS NULL` batch has no row-level claim, so do
+  #     NOT `--scale summarizer` >1 (concurrent workers would double-spend LLM calls). ---
   summarizer:
     build:
       context: ..
