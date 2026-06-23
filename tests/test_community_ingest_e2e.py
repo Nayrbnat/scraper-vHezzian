@@ -15,6 +15,8 @@ from scrapeforge.core.db.session import make_sessionmaker
 from scrapeforge.core.models import Article, ScrapeResult
 from scrapeforge.core.objectstore.memory import InMemoryObjectStore
 from scrapeforge.core.queue.memory import InMemoryMessageQueue
+from scrapeforge.core.storage.base import url_id
+from scrapeforge.worker.messages import raw_object_key
 
 
 @pytest.fixture
@@ -113,6 +115,29 @@ async def test_seed_to_postgres_end_to_end(
     assert titles == {"Chip Alpha", "Semi Beta"}
     assert all(a.author == "Writer" for a in articles)
     assert all(a.bucket == "community" for a in articles)
+
+    # 4a. Message-bucket plumbing: the raw object-store key must carry "community"
+    #     (proves source.bucket → IngestMessage['bucket'] → raw_object_key end-to-end).
+    chip_key = raw_object_key("community", url_id("https://www.chipstrat.com/p/a"))
+    semi_key = raw_object_key("community", url_id("https://newsletter.semianalysis.com/p/b"))
+    assert await store.exists(chip_key), f"Expected raw key {chip_key!r} in object store"
+    assert await store.exists(semi_key), f"Expected raw key {semi_key!r} in object store"
+    # Both keys must begin with the canonical prefix.
+    assert chip_key.startswith("raw/community/")
+    assert semi_key.startswith("raw/community/")
+
+    # 4b. Job lifecycle: scheduler creates one Job per source; worker must mark each done.
+    from sqlalchemy import select
+
+    from scrapeforge.core.db.models import Job
+
+    job_rows = (await db_session.execute(select(Job))).scalars().all()
+    # Two sources → two Job rows.
+    assert len(job_rows) == 2, f"Expected 2 Job rows, got {len(job_rows)}"
+    for job in job_rows:
+        assert job.status == "done", f"Job {job.id!r} status={job.status!r}, expected 'done'"
+        assert job.result_count == 1, f"Job {job.id!r} result_count={job.result_count}, expected 1"
+        assert job.finished_at is not None, f"Job {job.id!r} finished_at is None"
 
     # 5. Re-run scheduler + worker → no duplicate rows.
     await enqueue_due_sources(session_factory=session_factory, queue=queue, settings=settings)
