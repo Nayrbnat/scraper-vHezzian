@@ -134,3 +134,39 @@ async def test_api_key_never_logged(fake_env, caplog) -> None:
             title="T", content="C", published=None, portfolio=[], interests=[]
         )
     assert "secret-key" not in caplog.text
+
+
+@respx.mock
+async def test_empty_choices_raises_parse_error(fake_env) -> None:
+    from scrapeforge.core.llm.openai_compatible import OpenAICompatibleSummarizer
+
+    respx.post(_URL).mock(return_value=httpx.Response(200, json={"choices": []}))
+    with pytest.raises(LLMParseError, match="malformed completion envelope"):
+        await OpenAICompatibleSummarizer(_settings(fake_env)).summarize(
+            title="T", content="C", published=None, portfolio=[], interests=[]
+        )
+
+
+@respx.mock
+async def test_bool_score_raises_parse_error(fake_env) -> None:
+    from scrapeforge.core.llm.openai_compatible import OpenAICompatibleSummarizer
+
+    body = json.dumps(
+        {
+            "bullets": ["b1", "b2", "b3"],
+            "scores": {
+                "relevance": True,
+                "credibility": 5,
+                "intensity": 5,
+                "personal": 5,
+                "time": 5,
+            },
+            "relevance": 5,
+            "reason": "x",
+        }
+    )
+    respx.post(_URL).mock(return_value=httpx.Response(200, json=_completion(body)))
+    with pytest.raises(LLMParseError):
+        await OpenAICompatibleSummarizer(_settings(fake_env)).summarize(
+            title="T", content="C", published=None, portfolio=[], interests=[]
+        )

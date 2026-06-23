@@ -20,7 +20,9 @@ _SCORE_KEYS = ("relevance", "credibility", "intensity", "personal", "time")
 
 
 def _clamp_1_10(value: object) -> int:
-    """Coerce *value* to an int in [1, 10]; raise LLMParseError if non-numeric."""
+    """Coerce *value* to an int in [1, 10]; raise LLMParseError if non-numeric or bool."""
+    if isinstance(value, bool):
+        raise LLMParseError(f"non-numeric score: {value!r}")
     try:
         n = int(round(float(value)))  # type: ignore[arg-type]
     except (TypeError, ValueError) as exc:
@@ -123,7 +125,11 @@ class OpenAICompatibleSummarizer(Summarizer):
                     elif resp.status_code >= 400:
                         raise LLMError(f"LLM HTTP {resp.status_code}")
                     else:
-                        return resp.json()["choices"][0]["message"]["content"]
+                        try:
+                            data = resp.json()
+                            return data["choices"][0]["message"]["content"]
+                        except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+                            raise LLMParseError("malformed completion envelope") from exc
                 if attempt < self._s.SUMMARY_MAX_RETRIES:
                     await asyncio.sleep(0.5 * (attempt + 1))
         raise LLMRateLimitError(f"rate-limited/timeout after retries (last={last_status})")
