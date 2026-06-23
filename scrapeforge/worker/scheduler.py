@@ -33,7 +33,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from scrapeforge.core.db.models import Source
 from scrapeforge.core.db.repositories import create_job
 from scrapeforge.core.queue.base import MessageQueue
-from scrapeforge.worker.messages import JobMessage
+from scrapeforge.worker.messages import IngestMessage, JobMessage
 
 
 async def _list_enabled_sources(session) -> list[Source]:
@@ -92,16 +92,26 @@ async def enqueue_due_sources(
                 params=source.params,
             )
 
-            # Resolve the URL: prefer params['url'], fall back to source.name.
-            url = source.params.get("url") or source.name
-
-            # Publish the JobMessage.
-            message: JobMessage = {
-                "job_id": job_id,
-                "url": url,
-                "bucket": source.bucket,
-            }
-            await queue.publish(settings.JOB_QUEUE, message)
+            platform = source.params.get("platform")
+            if platform:
+                # Community *publication* source → fan-in to the ingest worker.
+                ingest: IngestMessage = {
+                    "job_id": job_id,
+                    "platform": platform,
+                    "target": source.params.get("url") or source.name,
+                    "bucket": source.bucket,
+                    "limit": int(source.params.get("limit", 25)),
+                }
+                await queue.publish(settings.INGEST_QUEUE, ingest)
+            else:
+                # Single-URL source → today's scraper-worker path (unchanged).
+                url = source.params.get("url") or source.name
+                message: JobMessage = {
+                    "job_id": job_id,
+                    "url": url,
+                    "bucket": source.bucket,
+                }
+                await queue.publish(settings.JOB_QUEUE, message)
 
             count += 1
 
