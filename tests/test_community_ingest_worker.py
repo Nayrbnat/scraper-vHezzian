@@ -62,6 +62,59 @@ def _msg(job_id: str) -> IngestMessage:
     )
 
 
+def test_resolve_scraper_returns_substack_instance() -> None:
+    from scrapeforge.scrapers.community.substack import SubstackScraper
+    from scrapeforge.worker.community_ingest_worker import _resolve_scraper
+
+    scraper = _resolve_scraper("substack")
+    assert isinstance(scraper, SubstackScraper)
+
+
+def test_resolve_scraper_raises_for_unknown_platform() -> None:
+    from scrapeforge.worker.community_ingest_worker import _resolve_scraper
+
+    with pytest.raises(ValueError, match="nope"):
+        _resolve_scraper("nope")
+
+
+@pytest.mark.db
+async def test_drain_loop_processes_queue_and_marks_job_done(
+    db_session: AsyncSession, session_factory, monkeypatch
+) -> None:
+    import types
+
+    from scrapeforge.core.db.models import Job as JobRow
+    from scrapeforge.core.queue.memory import InMemoryMessageQueue
+    from scrapeforge.worker import community_ingest_worker
+    from scrapeforge.worker.community_ingest_worker import run_community_ingest_worker
+
+    job_id = uuid.uuid4().hex
+    async with session_factory() as s:
+        await create_job(s, job_id=job_id, source="www.chipstrat.com", params={})
+
+    url_a = "https://www.chipstrat.com/p/drain-a"
+    fake_scraper = _FakeScraper([_success(url_a, "DrainAlpha")])
+    monkeypatch.setattr(community_ingest_worker, "_resolve_scraper", lambda _platform: fake_scraper)
+
+    queue = InMemoryMessageQueue()
+    store = InMemoryObjectStore()
+    settings = types.SimpleNamespace(INGEST_QUEUE="ingest", QUEUE_MAX_RETRIES=2)
+
+    await queue.publish("ingest", dict(_msg(job_id)))
+
+    assert await queue.size("ingest") == 1
+
+    await run_community_ingest_worker(
+        queue=queue, store=store, session_factory=session_factory, settings=settings
+    )
+
+    assert await queue.size("ingest") == 0
+    job = await db_session.get(JobRow, job_id)
+    assert job is not None
+    assert job.status == "done"
+    assert job.result_count == 1
+
+
 @pytest.mark.db
 async def test_persists_success_articles_and_skips_paywalled(
     db_session: AsyncSession, session_factory
