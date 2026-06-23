@@ -93,6 +93,7 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://localhost:6379/0"
     JOB_QUEUE: str = "scrapeforge:jobs"  # API -> scraper workers
     RESULTS_QUEUE: str = "scrapeforge:results"  # scraper -> transform workers
+    INGEST_QUEUE: str = "scrapeforge:ingest"  # scheduler -> community-ingest workers (publications)
     DLQ_SUFFIX: str = ":dlq"  # dead-letter stream suffix (poison messages)
     QUEUE_MAX_RETRIES: int = 5  # attempts before a message is dead-lettered
 

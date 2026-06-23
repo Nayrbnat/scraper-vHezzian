@@ -45,6 +45,20 @@ class ResultPointer(TypedDict):
     fetched_at: str  # ISO-8601 UTC timestamp
 
 
+class IngestMessage(TypedDict):
+    """INGEST-queue payload: scrape a whole publication (scheduler → community-ingest worker).
+
+    Unlike ``JobMessage`` (one URL → one raw object), this names a *publication* that the
+    community-ingest worker scrapes via the bucket scraper's ``scrape_publication``.
+    """
+
+    job_id: str
+    platform: str  # e.g. "substack"
+    target: str  # publication host, e.g. "newsletter.semianalysis.com"
+    bucket: str  # "community"
+    limit: int  # max posts to fetch this run
+
+
 def raw_object_key(bucket: str, url_id: str) -> str:
     """Deterministic object-store key for a raw payload.
 
