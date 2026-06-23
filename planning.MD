@@ -224,6 +224,29 @@ Only after this passes do we build the full proxy/humanize/escalation stack agai
 - [ ] Substack public posts fetch via `curl_cffi`. Paywalled posts escalate correctly.
 - [ ] WSO/Imperva scraper can navigate past initial challenge in manual staging.
 
+### 3.6 Community Ingestion — Phase 1 (lean scheduled pipeline)
+
+> ✅ **DELIVERED** (branch `feat/community-ingestion`). Daily scheduled ingestion of the 50
+> curated investing-focused Substacks into Postgres via the `INGEST` queue:
+>
+> - **`IngestMessage`** contract added to `worker/messages.py`; `INGEST_QUEUE` setting added.
+> - **`seed-substacks` CLI** (`community seed-substacks [--dry-run] [--limit N]`) atomically
+>   upserts the 50 curated `Source` rows into the `sources` table (idempotent; `ON CONFLICT DO
+>   UPDATE`).
+> - **Scheduler routing** updated: `Source` rows carrying `params.platform` are published to the
+>   `INGEST` queue; single-URL sources continue to the existing `JOB` queue unchanged.
+> - **`community_ingest_worker`** (`worker/community_ingest_worker.py`) consumes each
+>   `IngestMessage`, runs `SubstackScraper.scrape_publication`, archives each new post's raw
+>   payload to the object store (claim-check/replay), and UPSERTs parsed rows via `PostgresSink`
+>   (idempotent by `sha256(url)`). Owns the full Job lifecycle (queued → running → done | error).
+> - **Deployment entry point** (`worker/run_community_ingest.py`) + `community-ingest` service
+>   added to `deployment/docker-compose.yml`.
+> - **Invariant #18 carve-out documented** in SPEC.md: the scraper→transform split governs
+>   public-bucket HTML; community/JSON scrapers persist in-worker while still archiving raw.
+>
+> **Next phases:** per-article AI summaries → relevance ranking against user watchlist/themes →
+> swipe-style daily brief UI (see Phase 9).
+
 ---
 
 ## 4. Phase 4: Bucket 1 — Premium News Paywalls
@@ -531,6 +554,7 @@ auth/StateStore (Phase 4) for gated sources; embeddings (Phase 8) for semantic r
 | Phase 1.5: Vertical Slice | 0.5–1 day | Day 6 | One real URL end-to-end: async + JA4 + JSONL + resume |
 | Phase 2: Bucket 3 | 2–3 days | Day 9 | Public news scraper, CLI v1 |
 | Phase 3: Bucket 2 | 3–4 days | Day 12 | Reddit, Substack, WSO scrapers |
+| Phase 3.6: Community ingestion Phase 1 | ✅ delivered | — | Lean scheduled ingestion of 50 curated Substacks → Postgres via INGEST queue; next: AI summaries → ranking → brief UI |
 | Phase 4: Bucket 1 | 5–7 days | Day 19 | Premium paywall scraper, auth system |
 | Phase 5: Integration | 3–4 days | Day 23 | Engine, docs, performance, final QA |
 | Phase 6: Serving API & Datastore | 4–6 days | Day 29 | Postgres, PostgresSink, FastAPI read+jobs, workers |

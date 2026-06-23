@@ -150,3 +150,55 @@ def scrape_substacks(
 
     pubs, total = asyncio.run(_run())
     typer.echo(f"Scraped {total} articles from {pubs} publication(s) → {output}.jsonl")
+
+
+@community_app.command("seed-substacks")
+def seed_substacks(
+    limit: int = typer.Option(
+        25, "--limit", "-l", help="Per-source post cap stored on each Source"
+    ),
+    database_url: str | None = typer.Option(
+        None, "--database-url", help="Override DATABASE_URL (defaults to Settings)"
+    ),
+    enabled: bool = typer.Option(
+        True, "--enabled/--disabled", help="Seed sources as scheduler-enabled or not"
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Print the curated list without touching the database"
+    ),
+) -> None:
+    """Seed the curated investing-Substack list into the ``sources`` table (idempotent).
+
+    The scheduler then routes these community publications to the INGEST queue, where the
+    community-ingest worker scrapes each on its daily tick.
+    """
+    from scrapeforge.scrapers.community.substack_sources import (
+        SUBSTACK_INVESTING_SOURCES,
+        seed_sources,
+    )
+
+    if dry_run:
+        for s in SUBSTACK_INVESTING_SOURCES:
+            flag = " [paid-leaning]" if s.paywall else ""
+            typer.echo(f"{s.sector:22s} {s.name:30s} {s.url}{flag}")
+        typer.echo(
+            f"\n{len(SUBSTACK_INVESTING_SOURCES)} curated sources (dry-run, nothing written)."
+        )
+        return
+
+    _use_selector_loop()
+
+    from scrapeforge.core.db.session import make_engine, make_sessionmaker
+
+    async def _run() -> int:
+        engine = make_engine(database_url)
+        session_factory = make_sessionmaker(engine)
+        try:
+            async with session_factory() as session:
+                return await seed_sources(session, limit=limit, enabled=enabled)
+        finally:
+            await engine.dispose()
+
+    count = asyncio.run(_run())
+    state = "enabled" if enabled else "disabled"
+    typer.echo(f"Seeded {count} Substack sources ({state}, limit={limit}) into the sources table.")

@@ -193,3 +193,9 @@ class TestSettingsEnvOverride:
         monkeypatch.setenv("TOTALLY_UNKNOWN_KEY", "some_value")
         s = Settings()  # must not raise
         assert s is not None
+
+
+def test_ingest_queue_default(fake_env) -> None:
+    from scrapeforge.config.settings import Settings
+
+    assert Settings().INGEST_QUEUE == "scrapeforge:ingest"

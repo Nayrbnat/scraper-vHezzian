@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import re
 
+import pytest
+
 from scrapeforge.scrapers.community.substack_sources import (
     SUBSTACK_INVESTING_SOURCES,
     SubstackSource,
@@ -154,3 +156,63 @@ class TestCli:
             app, ["community", "scrape-substacks", "--sector", "Nope", "--list"]
         )
         assert result.exit_code == 1
+
+
+@pytest.mark.db
+class TestSeedSources:
+    async def test_seeds_all_sources(self, db_session) -> None:
+        from sqlalchemy import select
+
+        from scrapeforge.core.db.models import Source
+        from scrapeforge.scrapers.community.substack_sources import (
+            SUBSTACK_INVESTING_SOURCES,
+            seed_sources,
+        )
+
+        n = await seed_sources(db_session, limit=5)
+        assert n == len(SUBSTACK_INVESTING_SOURCES)
+
+        rows = (await db_session.execute(select(Source))).scalars().all()
+        assert len(rows) == len(SUBSTACK_INVESTING_SOURCES)
+        assert all(r.bucket == "community" for r in rows)
+        assert all(r.params["platform"] == "substack" for r in rows)
+        assert all(r.params["limit"] == 5 for r in rows)
+
+    async def test_seeding_is_idempotent(self, db_session) -> None:
+        from sqlalchemy import func, select
+
+        from scrapeforge.core.db.models import Source
+        from scrapeforge.scrapers.community.substack_sources import (
+            SUBSTACK_INVESTING_SOURCES,
+            seed_sources,
+        )
+
+        await seed_sources(db_session, limit=5)
+        await seed_sources(db_session, limit=5)  # second run must not duplicate
+
+        total = await db_session.scalar(select(func.count()).select_from(Source))
+        assert total == len(SUBSTACK_INVESTING_SOURCES)
+
+    async def test_reseeding_updates_params(self, db_session) -> None:
+        from sqlalchemy import select
+
+        from scrapeforge.core.db.models import Source
+        from scrapeforge.scrapers.community.substack_sources import seed_sources
+
+        await seed_sources(db_session, limit=5)
+        await seed_sources(db_session, limit=42)  # change the per-source limit
+
+        row = (await db_session.execute(select(Source).limit(1))).scalars().first()
+        assert row is not None
+        assert row.params["limit"] == 42
+
+
+class TestSeedSubstacksCli:
+    def test_dry_run_lists_without_writing(self) -> None:
+        from typer.testing import CliRunner
+
+        from scrapeforge.cli import app
+
+        result = CliRunner().invoke(app, ["community", "seed-substacks", "--dry-run"])
+        assert result.exit_code == 0
+        assert "50 curated sources" in result.stdout

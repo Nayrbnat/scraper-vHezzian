@@ -347,3 +347,94 @@ def test_scheduler_settings_importable() -> None:
     from scrapeforge.worker.scheduler import SchedulerSettings  # noqa: F401
 
     assert SchedulerSettings is not None
+
+
+# ---------------------------------------------------------------------------
+# 5. session_factory fixture (mirrors test_transform_worker.py)
+# ---------------------------------------------------------------------------
+
+from scrapeforge.core.db.session import make_sessionmaker  # noqa: E402
+
+
+@pytest.fixture
+def session_factory(_db_url: str) -> async_sessionmaker[AsyncSession]:
+    """Return an ``async_sessionmaker`` bound to the test DB URL."""
+    engine = create_async_engine(_db_url, echo=False)
+    return make_sessionmaker(engine)
+
+
+# ---------------------------------------------------------------------------
+# 6. Routing: community platform sources go to INGEST queue
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.db
+async def test_community_platform_source_routes_to_ingest_queue(
+    db_session,
+    session_factory,
+) -> None:
+    """A Source with params.platform publishes an IngestMessage to INGEST_QUEUE."""
+    from scrapeforge.core.db.models import Source
+    from scrapeforge.worker.scheduler import enqueue_due_sources
+
+    async with session_factory() as s:
+        s.add(
+            Source(
+                name="substack:newsletter.semianalysis.com",
+                bucket="community",
+                params={
+                    "url": "newsletter.semianalysis.com",
+                    "platform": "substack",
+                    "limit": 7,
+                },
+                cron=None,
+                enabled=True,
+            )
+        )
+        await s.commit()
+
+    queue = InMemoryMessageQueue()
+    settings = types.SimpleNamespace(JOB_QUEUE="jobs", INGEST_QUEUE="ingest")
+
+    n = await enqueue_due_sources(session_factory=session_factory, queue=queue, settings=settings)
+
+    assert n == 1
+    assert await queue.size("ingest") == 1
+    assert await queue.size("jobs") == 0
+    msg = await queue.reserve("ingest")
+    assert msg is not None
+    assert msg.payload["platform"] == "substack"
+    assert msg.payload["target"] == "newsletter.semianalysis.com"
+    assert msg.payload["bucket"] == "community"
+    assert msg.payload["limit"] == 7
+    assert msg.payload["job_id"]
+
+
+@pytest.mark.db
+async def test_non_platform_source_still_routes_to_job_queue(
+    db_session,
+    session_factory,
+) -> None:
+    """A Source without params.platform keeps today's JobMessage/JOB_QUEUE behaviour."""
+    from scrapeforge.core.db.models import Source
+    from scrapeforge.worker.scheduler import enqueue_due_sources
+
+    async with session_factory() as s:
+        s.add(
+            Source(
+                name="ft.com-daily",
+                bucket="premium",
+                params={"url": "https://ft.com/x"},
+                cron=None,
+                enabled=True,
+            )
+        )
+        await s.commit()
+
+    queue = InMemoryMessageQueue()
+    settings = types.SimpleNamespace(JOB_QUEUE="jobs", INGEST_QUEUE="ingest")
+
+    await enqueue_due_sources(session_factory=session_factory, queue=queue, settings=settings)
+
+    assert await queue.size("jobs") == 1
+    assert await queue.size("ingest") == 0

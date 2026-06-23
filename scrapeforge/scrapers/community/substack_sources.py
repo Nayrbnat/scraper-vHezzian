@@ -16,16 +16,18 @@ it at and provides selection helpers the community CLI uses.
 
 How it is consumed
 ------------------
-These are *publication* hosts, not single-post URLs.  The working integration today is the
-community CLI ``scrape-substacks`` command, which drives ``SubstackScraper.scrape_publication``
-(offset-paginated archive discovery + per-post fetch) over the selected publications.
+These are *publication* hosts, not single-post URLs.  Two paths consume them:
 
-Recurring, scheduler-driven ingestion of *whole publications* needs a discovery/fan-out
-step (publication → N post URLs → N single-URL jobs) that the Phase-6 scraper worker does
-**not** have yet — its ``handle_scrape_job`` path is single-URL (``engine.scrape``).  So this
-module deliberately does **not** seed ``sources`` rows: doing so would enqueue bare hosts the
-single-post path can't scrape.  When the fan-out worker lands, a seed helper can be added
-here without touching this list.
+1. **On-demand CLI** — ``community scrape-substacks`` drives
+   ``SubstackScraper.scrape_publication`` (offset-paginated archive discovery + per-post
+   fetch) over the selected publications and writes results to a JSONL sink.
+
+2. **Scheduled ingestion** — ``seed_sources`` (bottom of this module) upserts the
+   curated list into the ``sources`` table as community ``Source`` rows with
+   ``params["platform"] = "substack"``.  The scheduler detects that field and routes
+   each source to the ``INGEST`` queue instead of the single-URL ``JOB`` queue.  The
+   ``community_ingest_worker`` then calls ``scrape_publication`` on each source, archives
+   raw payloads (claim-check), and persists parsed articles via ``PostgresSink``.
 
 Verification
 ------------
@@ -193,3 +195,52 @@ def select_sources(
     """
     items = SUBSTACK_INVESTING_SOURCES if sector is None else by_sector(sector)
     return items if limit is None else tuple(items[:limit])
+
+
+async def seed_sources(session, *, limit: int = 25, enabled: bool = True) -> int:
+    """Idempotently upsert the curated publications into the ``sources`` table.
+
+    Uses a single atomic ``INSERT ... ON CONFLICT (name) DO UPDATE`` so re-running never
+    duplicates and a concurrent re-run cannot raise on the unique ``Source.name``.  Each
+    row is a community publication source the scheduler routes to the INGEST queue:
+    ``params = {"url": <host>, "platform": "substack", "limit": <limit>}``.
+
+    The query is inlined here rather than added to ``repositories.py`` — that file is
+    off-limits for feature additions (Invariant #17); the scheduler inlines its own
+    ``Source`` query for the same reason.
+
+    Args:
+        session: Open ``AsyncSession`` (committed before returning).
+        limit:   Per-source post cap stored in ``params['limit']``.
+        enabled: Whether seeded sources are scheduler-enabled.
+
+    Returns:
+        Number of curated sources processed — always ``len(SUBSTACK_INVESTING_SOURCES)``.
+    """
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    from scrapeforge.core.db.models import Source
+
+    rows = [
+        {
+            "name": f"substack:{s.base}",
+            "bucket": "community",
+            "params": {"url": s.base, "platform": "substack", "limit": limit},
+            "cron": None,
+            "enabled": enabled,
+        }
+        for s in SUBSTACK_INVESTING_SOURCES
+    ]
+    stmt = pg_insert(Source).values(rows)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["name"],
+        set_={
+            "bucket": stmt.excluded.bucket,
+            "params": stmt.excluded.params,
+            "cron": stmt.excluded.cron,
+            "enabled": stmt.excluded.enabled,
+        },
+    )
+    await session.execute(stmt)
+    await session.commit()
+    return len(rows)
