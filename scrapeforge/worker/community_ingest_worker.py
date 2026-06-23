@@ -80,6 +80,8 @@ async def handle_ingest_job(
             if result.status != "success" or result.article is None:
                 continue
             article = result.article
+            # Intra-batch dedup only: PostgresSink.seen() is in-process, so a fresh sink
+            # per job won't skip across runs — cross-run idempotency rests on the UPSERT.
             if sink.seen(article.url):
                 continue
             key = raw_object_key(bucket, url_id(article.url))
