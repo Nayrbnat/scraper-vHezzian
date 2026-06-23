@@ -1265,6 +1265,12 @@ class Article(Base):
     meta: Mapped[dict] = mapped_column(JSONB, default=dict)   # source provenance, driver_used, etc.
     embedding: Mapped[list[float] | None] = mapped_column(Vector(1536), nullable=True)  # Phase-2 RAG
 
+    # Phase 2 — AI summarization (added by the summarizer worker; NULL until processed)
+    relevance: Mapped[int | None] = mapped_column(index=True, nullable=True)
+    """Overall AI relevance-to-owner score 1–10 (NULL until scored). Indexed for 'top by relevance' queries."""
+    summary: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    """{bullets: list[str], scores: dict[str,int], reason: str, model: str, generated_at: ISO-8601}. NULL until summarized."""
+
 class Job(Base):
     __tablename__ = 'jobs'
     id: Mapped[str] = mapped_column(primary_key=True)
@@ -1335,6 +1341,116 @@ class WorkerSettings:
 class SchedulerSettings:
     cron_jobs = [...]       # arq cron → enqueue run_scrape_job per configured Source ("continuously populate")
 ```
+
+---
+
+### 3.24 LLM Summarization Port (`core/llm/`) — Phase 2
+
+**Responsibility:** provider-agnostic article summarization. Produces a 5-bullet investor
+summary and a 1–10 relevance score in a single LLM call per article. Writes results back to
+the `articles` table as `summary` (JSONB) and `relevance` (INT). This is a **batch
+read-modify-write over Postgres** — it is NOT on the claim-check transform path (see
+Invariant #18 carve-out notes in §9).
+
+#### `SummaryResult` (frozen dataclass, `core/llm/base.py`)
+
+```python
+@dataclass(frozen=True)
+class SummaryResult:
+    bullets: list[str]          # exactly 5 investor-focused bullet points
+    relevance: int              # overall score 1–10 (clamped; 10 = immediately actionable)
+    scores: dict[str, int]      # {"relevance":n, "credibility":n, "intensity":n, "personal":n, "time":n}
+    reason: str                 # one-sentence plain-English explanation of the relevance score
+    model: str                  # model name echoed from the API response
+```
+
+#### `Summarizer` (ABC, `core/llm/base.py`)
+
+```python
+class Summarizer(ABC):
+    @abstractmethod
+    async def summarize(
+        self,
+        *,
+        title: str,
+        content: str,
+        published: str,          # ISO-8601 date string
+        portfolio: list[str],    # owner's holdings (from SummarizerSettings)
+        interests: list[str],    # owner's theme interests (from SummarizerSettings)
+    ) -> SummaryResult: ...
+```
+
+#### `OpenAICompatibleSummarizer` (`core/llm/openai_compatible.py`)
+
+Default adapter. Uses `httpx.AsyncClient` to POST to `{SUMMARY_API_BASE_URL}/chat/completions`
+with a structured JSON prompt. Behaviour:
+
+- Parses the model's JSON response; on parse failure, applies a lenient regex fallback.
+  Unrecoverable parse failures raise `LLMParseError` and the worker skips that row.
+- Clamps all sub-scores and the overall score to `[1, 10]`.
+- On HTTP 429, raises `LLMRateLimitError`; the batch worker stops the run (rather than
+  burning retries against a hard rate limit).
+- Never logs or prints `SUMMARY_API_KEY`.
+
+Default model: **Zhipu GLM-4.5-Flash** (free tier) via
+`https://open.bigmodel.cn/api/paas/v4`. Swap to DeepSeek, Qwen, or any OpenAI-compatible
+provider by changing `SUMMARY_API_*` env vars — no code change required.
+
+#### `SummarizerSettings` (per-module fragment, `core/llm/settings.py`)
+
+Per-module `BaseSettings` fragment — does **not** extend or modify the core `Settings` class
+(Invariant #16). Reads from the same `.env` file.
+
+| Variable | Default | Description |
+|---|---|---|
+| `SUMMARY_API_KEY` | `""` | API key; empty string = worker idles with a warning |
+| `SUMMARY_API_BASE_URL` | `https://open.bigmodel.cn/api/paas/v4` | Any OpenAI-compatible base URL |
+| `SUMMARY_API_MODEL` | `glm-4-flash` | Model name sent in every request |
+| `SUMMARY_API_TIMEOUT` | `30` | Per-request timeout (seconds) |
+| `SUMMARY_BATCH_SIZE` | `20` | Articles fetched per `summarize_pending()` call |
+| `SUMMARY_PORTFOLIO` | `""` | Comma-separated list of owner's holdings (e.g. `TSLA,BTC`) |
+| `SUMMARY_INTERESTS` | `""` | Comma-separated theme interests (e.g. `AI,energy`) |
+
+`portfolio()` and `interests()` are helper properties that split the CSV strings into lists.
+
+`SUMMARY_API_KEY` is **only ever read from `.env`** (gitignored). It is never committed,
+never logged, and CI never calls the live API.
+
+#### LLM Exception Hierarchy (`core/llm/exceptions.py`)
+
+```
+ScrapeForgeError
+└── LLMError                   # base for all LLM failures
+    ├── LLMRateLimitError      # HTTP 429; batch worker stops the current run
+    └── LLMParseError          # model returned unparseable output; worker skips the row
+```
+
+#### Idempotent Migration (`core/db/migrations.py`)
+
+Called at summarizer entry-point startup (`worker/run_summarize.py`) to self-heal existing
+production databases. Uses raw `ALTER TABLE … ADD COLUMN IF NOT EXISTS` — no Alembic dependency.
+
+```sql
+ALTER TABLE articles ADD COLUMN IF NOT EXISTS relevance INTEGER;
+ALTER TABLE articles ADD COLUMN IF NOT EXISTS summary JSONB;
+CREATE INDEX IF NOT EXISTS ix_articles_relevance ON articles (relevance);
+```
+
+#### Summarizer Worker (`worker/summarize_worker.py`, `worker/run_summarize.py`)
+
+`summarize_pending(session, summarizer, settings)` — one batch cycle:
+1. `SELECT … WHERE summary IS NULL LIMIT batch_size` (ordered by `fetched_at DESC`).
+2. For each article: call `summarizer.summarize(…)` → `UPDATE articles SET relevance=…, summary=…`.
+3. On `LLMParseError`: log warning, skip the row (set `summary = {"error": …}` to avoid
+   re-querying a permanently-broken article).
+4. On `LLMRateLimitError`: log warning, abort the run.
+
+`run_summarize_worker(session_factory, summarizer, settings)` — outer loop: calls
+`summarize_pending` in successive batches until no pending articles remain or a rate-limit
+stops the run.
+
+`worker/run_summarize.py` is the deployment entry point (`python -m scrapeforge.worker.run_summarize`),
+mirrors the shape of `run_transform.py`, and invokes `core/db/migrations.py` at startup.
 
 ---
 
@@ -1673,3 +1789,11 @@ class RedditSettings(BaseSettings):
     object store for claim-check/replay. Rationale: these scrapers produce complete `Article`s at
     fetch time, so a separate HTML-selector transform stage adds nothing and cannot parse their
     JSON-sourced fields. The scheduler routes such sources to the `INGEST` queue.
+
+    **Summarizer carve-out (Phase 2).** The `summarize_worker.py` / `run_summarize.py`
+    worker is an independent **batch read-modify-write over Postgres** — it is not part of the
+    scraper→transform pipeline at all. It polls `articles WHERE summary IS NULL`, calls an
+    external LLM (via the `core/llm/` port; see §3.24), and UPSERTs `relevance` +
+    `summary` on the same row. This is the same class of carve-out as community ingestion: the
+    pipeline decoupling governs the *ingest* path only. Post-ingest enrichment workers that
+    read from and write back to Postgres are explicitly permitted.
