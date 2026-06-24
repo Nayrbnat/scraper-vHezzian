@@ -42,6 +42,9 @@ dependencies = [
     "arq>=0.26",
     "redis>=5.0",
     "aioboto3>=13.0",         # async S3 client for the object store (MinIO now, S3/GCS later)
+    # LLM summarizer (Phase 2) — OpenAICompatibleSummarizer uses httpx at RUNTIME, so it must
+    # be a runtime dep (not just a test extra), else `pip install .` on the deploy runner can't summarize.
+    "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
