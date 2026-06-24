@@ -17,6 +17,8 @@ name: Daily digest
 #   2. Add a DATABASE_URL repo secret pointing at the production Postgres instance
 #      (postgresql+asyncpg://user:pass@host:port/db).
 # The workflow passes DATABASE_URL from secrets; it is ignored (empty) when source is "sample".
+# IMPORTANT: when DIGEST_SOURCE=postgres you MUST set the DATABASE_URL secret — an unset secret
+# resolves to an empty string and overrides the app's default DSN, so the connection fails.
 
 on:
   schedule:
