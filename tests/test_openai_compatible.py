@@ -8,7 +8,7 @@ import httpx
 import pytest
 import respx
 
-from scrapeforge.core.llm.exceptions import LLMParseError, LLMRateLimitError
+from scrapeforge.core.llm.exceptions import LLMError, LLMParseError, LLMRateLimitError
 from scrapeforge.core.llm.settings import SummarizerSettings
 
 _BASE = "https://api.z.ai/api/paas/v4"
@@ -120,6 +120,26 @@ async def test_429_retries_then_rate_limit_error(fake_env, monkeypatch) -> None:
             title="T", content="C", published=None, portfolio=[], interests=[]
         )
     assert route.call_count == 2  # initial + 1 retry (SUMMARY_MAX_RETRIES=1)
+
+
+@respx.mock
+async def test_timeout_is_skippable_not_rate_limit(fake_env, monkeypatch) -> None:
+    """A pure timeout (slow reasoning model) must raise a SKIPPABLE LLMError — NOT
+    LLMRateLimitError, which would make the worker hard-stop the entire run."""
+    import asyncio
+
+    from scrapeforge.core.llm.openai_compatible import OpenAICompatibleSummarizer
+
+    async def _no_sleep(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(asyncio, "sleep", _no_sleep)
+    respx.post(_URL).mock(side_effect=httpx.TimeoutException("timed out"))
+    with pytest.raises(LLMError) as exc_info:
+        await OpenAICompatibleSummarizer(_settings(fake_env)).summarize(
+            title="T", content="C", published=None, portfolio=[], interests=[]
+        )
+    assert not isinstance(exc_info.value, LLMRateLimitError)
 
 
 @respx.mock

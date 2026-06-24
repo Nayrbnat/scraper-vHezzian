@@ -112,16 +112,16 @@ class OpenAICompatibleSummarizer(Summarizer):
         return self._parse(text)
 
     async def _post_with_retry(self, url: str, payload: dict, headers: dict) -> str:
-        last_status = None
+        saw_429 = False
         async with httpx.AsyncClient(timeout=self._s.SUMMARY_REQUEST_TIMEOUT) as client:
             for attempt in range(self._s.SUMMARY_MAX_RETRIES + 1):
                 try:
                     resp = await client.post(url, json=payload, headers=headers)
                 except httpx.TimeoutException:
-                    last_status = "timeout"
+                    pass  # transient (slow reasoning model); retry, then fall through to LLMError
                 else:
                     if resp.status_code == 429:
-                        last_status = 429
+                        saw_429 = True
                     elif resp.status_code >= 400:
                         raise LLMError(f"LLM HTTP {resp.status_code}")
                     else:
@@ -132,7 +132,11 @@ class OpenAICompatibleSummarizer(Summarizer):
                             raise LLMParseError("malformed completion envelope") from exc
                 if attempt < self._s.SUMMARY_MAX_RETRIES:
                     await asyncio.sleep(0.5 * (attempt + 1))
-        raise LLMRateLimitError(f"rate-limited/timeout after retries (last={last_status})")
+        # A real 429 stops the run (respect the rate limit). A pure timeout is a per-article
+        # failure the worker SKIPS — a single slow reasoning response must not kill the whole batch.
+        if saw_429:
+            raise LLMRateLimitError("rate-limited after retries")
+        raise LLMError("request timed out after retries")
 
     def _parse(self, text: str) -> SummaryResult:
         obj = _loads(text)
