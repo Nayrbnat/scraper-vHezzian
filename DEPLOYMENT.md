@@ -1,117 +1,118 @@
-# DEPLOYMENT.md — hosting ScrapeForge (single VPS + Docker Compose)
+# DEPLOYMENT.md — Render + Neon runbook
 
-> Target: one Linux VPS running the whole stack via `deployment/docker-compose.yml`. Cheapest, full
-> control, and it can run real Chrome + residential proxies (which serverless cannot). Scale workers out
-> later. The serving API is stateless, so it can move to a managed/serverless host reading the same
-> Postgres if you outgrow one box.
+> **Target:** three daily Render Cron Jobs (ingest → summarize → digest) running against a Neon
+> serverless Postgres. No Redis, no MinIO, no always-on server. The full docker-compose stack
+> (`deployment/docker-compose.yml`) remains the scale-out option — this runbook covers the lean live
+> path only.
 
-## 1. Topology
+---
 
-| Service | Plane | Image / build | Notes |
-|---|---|---|---|
-| `caddy` | edge | `caddy:2` | auto-HTTPS, reverse-proxy → `api:8000` |
-| `api` | serving | `Dockerfile.api` (slim) | read + enqueue only; **no browser**; scale with `--workers` |
-| `worker` | ingestion | `Dockerfile.worker` (Chrome) | consumes jobs, drives browsers, writes Postgres |
-| `scheduler` | ingestion | `Dockerfile.worker` | arq cron → enqueues recurring scrapes |
-| `nodriver` | ingestion | `services/nodriver_service` | AGPL-isolated; separate process boundary |
-| `postgres` | data | `pgvector/pgvector:pg16` | articles + jobs (+ future embeddings) |
-| `redis` | data | `redis:7` | job queue (arq) |
+## 1. Create a Neon database
 
-## 2. VPS sizing (rough starting point)
+1. Sign in at [neon.tech](https://neon.tech) and create a new project (choose the region closest to
+   your Render deployment; e.g. `us-east-1`).
+2. In the **Connection Details** panel, select the **pooled** connection string (Neon's connection
+   pooler keeps serverless cold-start latency low).
+3. Convert the DSN for asyncpg:
+   - Neon gives you: `postgresql://user:pass@host/db?sslmode=require`
+   - Change scheme to: `postgresql+asyncpg://user:pass@host/db`
+   - Remove the `?sslmode=require` query parameter — SSL is controlled by the separate
+     `DATABASE_SSL=require` env var that tells `make_engine` to pass `ssl=True` in asyncpg
+     connect-args (the query parameter is not supported by asyncpg directly).
+4. Save the converted DSN as `DATABASE_URL` and note `DATABASE_SSL=require` — you will set both in
+   the Render dashboard (see §2).
 
-Each concurrent Chrome ≈ 0.5–1 GB RAM + ~0.5 vCPU under load. Budget for `COMMUNITY/PUBLIC_MAX_CONCURRENCY`
-plus Postgres + Redis + API:
+---
 
-| Workload | vCPU | RAM | Disk |
-|---|---|---|---|
-| Light (≤3 concurrent browsers) | 2 | 8 GB | 40 GB SSD |
-| **Recommended start (≤5 concurrent)** | **4** | **16 GB** | **80 GB SSD** |
-| Heavy (≤10, multiple workers) | 8 | 32 GB | 160 GB SSD |
+## 2. Deploy via Render Blueprint
 
-Premium (Bucket 1) runs at concurrency 1 with a ≥60 s rate floor, so it adds little parallel browser load.
+1. Push or fork this repo to GitHub (Render connects to GitHub/GitLab).
+2. In the [Render dashboard](https://dashboard.render.com), click **New → Blueprint** and connect
+   the repo. Render detects `render.yaml` and creates all four cron services automatically
+   (`ingest`, `summarize`, `digest`, `init-db`).
+3. For every `sync: false` env var in `render.yaml`, set the **real value in the Render dashboard**
+   (Environment → Cron service → Environment Variables). The secrets are:
 
-## 3. First deploy
+   | Env var | What to put |
+   |---|---|
+   | `DATABASE_URL` | the asyncpg DSN from §1 |
+   | `STATE_STORE_KEY` | a Fernet key: `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"` |
+   | `SUMMARY_API_KEY` | your GLM / OpenAI-compatible API key |
+   | `SUMMARY_PORTFOLIO` | your portfolio description (used for relevance scoring) |
+   | `SUMMARY_INTERESTS` | your interests/keywords (used for relevance scoring) |
+   | `DIGEST_SMTP_HOST` | SMTP host (e.g. `smtp.gmail.com`) |
+   | `DIGEST_SMTP_PORT` | SMTP port (e.g. `587`) |
+   | `DIGEST_SMTP_USER` | SMTP username / sender address |
+   | `DIGEST_SMTP_PASSWORD` | Gmail app password or SMTP password |
+   | `DIGEST_FROM` | sender address shown in the email |
+   | `DIGEST_TO` | recipient address for the digest email |
 
-```bash
-# On the VPS (Docker + compose plugin installed):
-git clone https://github.com/Nayrbnat/scraper-vHezzian.git && cd scraper-vHezzian
-cp .env.example .env && edit .env          # fill in the secrets below
-# place your proxy list where the worker volume expects it:
-docker volume create scrapeforge_state-data
-# (copy proxies.txt into the state volume — see §6)
+   > **NEVER** put a real secret value in `render.yaml` or commit one to git. `render.yaml` only
+   > contains env-var names with `sync: false` — Render pulls the values from its encrypted secret
+   > store at runtime.
 
-docker compose -f deployment/docker-compose.yml --env-file .env up -d --build
-docker compose -f deployment/docker-compose.yml exec api alembic upgrade head   # run migrations
-docker compose -f deployment/docker-compose.yml ps
-```
+4. The non-secret values (`DATABASE_SSL=require`, `SUMMARY_MODEL`, `SUMMARY_API_BASE_URL`,
+   `DIGEST_SOURCE=postgres`) are already set inline in `render.yaml` and require no dashboard action.
 
-Validate the compose file before bringing it up:
-```bash
-docker compose -f deployment/docker-compose.yml --env-file .env config >/dev/null && echo OK
-```
+---
 
-## 4. Required secrets (`.env`, never committed)
+## 3. First run: init-db → ingest → summarize → digest
 
-| Var | Purpose |
-|---|---|
-| `POSTGRES_PASSWORD` | Postgres superuser password |
-| `STATE_STORE_KEY` | Fernet key (32+ char base64) encrypting session state |
-| `API_KEYS` | comma-separated API keys clients present to the serving API |
-| `API_DOMAIN` | public hostname Caddy issues TLS for |
-| `LOG_LEVEL` | INFO/DEBUG/… (optional) |
+Render cron jobs do **not** auto-run on deploy. Trigger them manually in order:
 
-Generate a Fernet key:
-```bash
-python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-```
+1. **Trigger `init-db` once** (and only once per fresh database).
+   In the Render dashboard → `init-db` cron → **Manual Trigger**. Wait for it to complete
+   successfully. This creates the pgvector extension, all tables, and the `summary`/`relevance`
+   columns on Neon.
 
-## 5. The Bucket 1 interactive-login wrinkle (read this)
+2. **Trigger `ingest`** → watch the logs. Expect rows to appear in the Neon `articles` table.
 
-Premium sites (FT/Bloomberg/WSJ/Economist) need a **human, headful** SSO login — which a headless VPS
-can't do. Two supported options:
+3. **Trigger `summarize`** → the worker calls the LLM API to fill `summary` and `relevance` for
+   each article that has `summary IS NULL`. Confirm rows are updated in Neon.
 
-1. **Operator login locally (recommended).** Run `scrapeforge login --site ft.com --interactive` on your
-   own machine (real Chrome window), complete SSO, which writes an **encrypted** state file
-   (`ft.com.enc`). Copy that file into the server's `state-data` volume:
-   ```bash
-   docker cp ft.com.enc $(docker compose ... ps -q worker):/data/states/ft.com.enc
-   ```
-   Workers decrypt it with `STATE_STORE_KEY` and reuse the session until TTL expiry, then you repeat.
-2. **VNC sidecar.** Run the Camoufox/Chrome VNC variant (`SSOHandler` supports `--vnc`) in a container,
-   connect over a tunnel, log in once. Heavier; use only if local login is impractical.
+4. **Trigger `digest`** → sends the relevance-ranked email. Verify that a real email arrives in the
+   `DIGEST_TO` inbox with article summaries ordered by relevance score. The digest sends to the
+   single bundled subscriber (`data/subscribers/dee.json`, shipped in the image); multi-subscriber
+   support is a later phase.
 
-State is **encrypted at rest**; never commit it and never bake it into an image.
+If any step fails, check the Render log stream for the cron service. Common causes:
+- `DATABASE_URL` is wrong scheme or missing `postgresql+asyncpg://` prefix.
+- `DATABASE_SSL` not set to `require` (Neon requires TLS).
+- SMTP credentials incorrect (Gmail: use an **App Password**, not your account password).
 
-## 6. Proxies
+---
 
-Residential proxies live in `proxies.txt` (`protocol://user:pass@host:port`, one per line), mounted via
-the `state-data` volume at `/data/proxies.txt` — **not** baked into the image and **not** committed.
+## 4. Schedule and DST note
 
-## 7. Backups
+The three production crons run at:
 
-```bash
-# Nightly logical backup of the article/job store:
-docker compose ... exec -T postgres pg_dump -U scrapeforge scrapeforge | gzip > backup-$(date +%F).sql.gz
-```
-Back up the `state-data` volume too (it holds encrypted sessions). Restore: `gunzip -c … | psql`.
+| Job | Schedule (UTC) | Approximate UK time |
+|---|---|---|
+| `ingest` | `0 6 * * *` — 06:00 UTC | 06:00 GMT / 07:00 BST |
+| `summarize` | `30 6 * * *` — 06:30 UTC | 06:30 GMT / 07:30 BST |
+| `digest` | `0 8 * * *` — 08:00 UTC | 08:00 GMT / 09:00 BST |
 
-## 8. TLS, scaling, observability
+Render cron schedules are always in **UTC**. During British Summer Time (BST, UTC+1, late
+March–late October) the email arrives one hour later in local time than in winter. If you want a
+fixed 08:00 London delivery year-round, change the digest schedule to `0 7 * * *` in `render.yaml`
+before BST starts and revert to `0 8 * * *` when GMT resumes. This is a manual adjustment —
+Render does not do timezone-aware cron.
 
-- **TLS:** Caddy issues/renews Let's Encrypt certs for `$API_DOMAIN` automatically — just point DNS at
-  the VPS and open 80/443.
-- **Scale ingestion:** `docker compose ... up -d --scale worker=3`. When one box is saturated, move
-  `worker`/`nodriver` to a second host pointed at the same Postgres/Redis (the serving plane is already
-  decoupled).
-- **Serving elsewhere:** because `api` is stateless and read-mostly, you can later run it on a managed
-  platform (or serverless) against a managed Postgres — keep ingestion on the VPS.
-- **Observability:** API exposes `/health` and `/ready`; the app emits structured JSON logs (`loguru`)
-  and Prometheus metrics (`scrape_count`, `success_rate`, `soft_block_rate`, `rate_limit_wait_seconds`,
-  job throughput). Scrape them with any Prometheus/Grafana, or ship logs to your aggregator.
+The `init-db` cron is scheduled for `0 0 31 2 *` (February 31, which never occurs), so it never
+runs automatically. Always trigger it manually via the Render dashboard.
 
-## 9. Security posture
+---
 
-- Private repo; GitHub secret scanning + push protection on.
-- Firewall: expose only 80/443 (Caddy). Postgres/Redis stay on the internal compose network.
-- Rotate `STATE_STORE_KEY` and `API_KEYS` out of band; revoke a leaked API key by removing it from
-  `API_KEYS` and restarting `api`.
-- Run `worker`/`api` as non-root (already set in the Dockerfiles).
+## 5. Security reminders
+
+- **Secrets live only in Render.** `render.yaml` is committed to git with `sync: false` — no
+  secret values, ever. Render's secret store is encrypted at rest.
+- **Rotate credentials on exposure.** If a Gmail App Password or GLM API key is ever committed or
+  logged, revoke it immediately (Google Account → Security → App passwords; GLM dashboard →
+  regenerate key). Update the Render env var with the new value.
+- **Neon TLS.** All connections to Neon go over TLS enforced by `DATABASE_SSL=require`. Do not
+  disable this (do not set `DATABASE_SSL` to anything other than `require` in production).
+- **Render image pulls.** Render builds the Docker image from your repo on each deploy. Keep
+  `deployment/Dockerfile.api` lean — do not copy `.env` files or secret material into the image.
+- **No secrets in logs.** The pipeline CLI does not log DSNs or API keys. If you add logging,
+  ensure secrets are masked before they reach stdout/stderr (Render streams logs to its dashboard).

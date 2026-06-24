@@ -461,10 +461,55 @@ Only after this passes do we build the full proxy/humanize/escalation stack agai
 
 ---
 
+## 6.5 Phase 6.5: Live Deployment — Render + Neon (ACTIVE)
+**Goal:** Ship a working, live-traffic deployment of the ingest → summarize → digest pipeline on
+Render Cron Jobs backed by Neon serverless Postgres, without Redis or MinIO.
+**Status:** 🔄 **ACTIVE — in progress.**
+
+> **Deferred:** swipe app UI (Phase 9 / `Phase 7.6`) and protected object-store buckets remain
+> deferred until the lean path is proven in production. Digest delivery by email ships first.
+
+### What was built (delivered tasks)
+
+| Deliverable | File(s) |
+|-------------|---------|
+| `pipeline/` sub-app with `init-db`, `ingest`, `summarize` commands | `scrapeforge/pipeline/{__init__,jobs,cli}.py` |
+| `DATABASE_SSL` opt-in TLS (`_ssl_connect_args`) | `scrapeforge/core/db/session.py` |
+| `make_engine` accepts explicit `database_url` arg | `scrapeforge/core/db/session.py` |
+| `Settings.DATABASE_URL` added to core settings | `scrapeforge/config/settings.py` |
+| `substack_sources.py` curated source list | `scrapeforge/scrapers/community/substack_sources.py` |
+| SQLi-audit guard test | `tests/test_no_raw_sql.py` |
+| Docs: pipeline sub-app + Render-cron path | `SPEC.md §3.26`, `architecture.MD §7.6`, this file |
+
+### Render configuration (three Cron Jobs)
+
+```
+Service: init-db  (Deploy Hook — runs once on each new deploy)
+  Command: scrapeforge pipeline init-db
+  Env:     DATABASE_URL=<neon-url>  DATABASE_SSL=require
+
+Service: ingest   (Cron: 0 */6 * * * — every 6 hours)
+  Command: scrapeforge pipeline ingest --limit 25
+  Env:     DATABASE_URL=<neon-url>  DATABASE_SSL=require  (+ CURL_CFFI_*)
+
+Service: summarize (Cron: 0 3 * * * — daily 03:00 UTC)
+  Command: scrapeforge pipeline summarize
+  Env:     DATABASE_URL=<neon-url>  DATABASE_SSL=require  SUMMARY_API_KEY=<key>
+```
+
+### Milestone: Live on Render + Neon
+- [ ] `scrapeforge pipeline init-db` completes successfully against Neon (SSL).
+- [ ] `scrapeforge pipeline ingest --limit 5` inserts at least 1 article into Neon.
+- [ ] `scrapeforge pipeline summarize` populates `relevance` + `summary` for those articles.
+- [ ] `scrapeforge digest send --source postgres --yes` sends the daily email from live data.
+- [ ] All three Render Cron Jobs scheduled and passing.
+
+---
+
 ## 7. Phase 7: Deployment & Hosting (single VPS + Docker Compose)
 **Goal:** Run both planes on one host; document the operational runbook.
 **Duration:** 2–3 days
-**Priority:** P2
+**Priority:** P2 — **deferred; use Phase 6.5 lean path first**
 
 - [ ] `deployment/docker-compose.yml` (api, worker, scheduler, nodriver, postgres[pgvector], redis, caddy).
 - [ ] `Dockerfile.api` (slim, no browser) + `Dockerfile.worker` (Python + system Chrome for patchright).
@@ -614,12 +659,13 @@ auth/StateStore (Phase 4) for gated sources; embeddings (Phase 8) for semantic r
 | Phase 3.6: Community ingestion Phase 1 | ✅ delivered | — | Lean scheduled ingestion of 50 curated Substacks → Postgres via INGEST queue; next: AI summaries → ranking → brief UI |
 | AI Summaries + Relevance (Phase 2) | ✅ delivered | — | `core/llm/` port + GLM-4.5-Flash adapter; `relevance` INT + `summary` JSONB columns; batch summarize worker; idempotent migrations |
 | Relevance Digest (Phase 2.5) | ✅ delivered | — | `digest/relevance.py` + `postgres_source.py` + `settings.py`; `DigestItem` bullets/relevance/reason; renderer badge+bullets path; `DIGEST_SOURCE` workflow variable; next: Phase 4 swipe UI |
+| **Live deployment — Render + Neon (Phase 6.5)** | **🔄 ACTIVE** | — | `pipeline/` sub-app (`init-db`/`ingest`/`summarize`); lean run-once Render Cron Jobs backed by Neon Postgres; `DATABASE_SSL` opt-in TLS; SQLi-audit guard (`tests/test_no_raw_sql.py`). Swipe app (Phase 9) and protected buckets deferred. |
 | Phase 4: Bucket 1 | 5–7 days | Day 19 | Premium paywall scraper, auth system |
 | Phase 5: Integration | 3–4 days | Day 23 | Engine, docs, performance, final QA |
 | Phase 6: Serving API & Datastore | 4–6 days | Day 29 | Postgres, PostgresSink, FastAPI read+jobs, workers |
-| Phase 7: Deployment | 2–3 days | Day 32 | Docker Compose on a VPS, runbook, scheduled scraping |
+| Phase 7: Deployment | 2–3 days | Day 32 | Docker Compose on a VPS, runbook, scheduled scraping — **alternative to Phase 6.5 for high-volume/multi-source needs** |
 | Phase 8: Bucket 4 — YouTube transcripts | 4–6 days | TBD | Track channels → transcripts (adopted libs) → embed (pgvector); blocked on repo go-ahead |
-| Phase 9: Source aggregation + AI daily brief | 5–8 days | TBD | Per-user JSON profile → source buckets → consolidate → AI daily market brief (the product); prototype for Dee |
+| Phase 9: Swipe app + personalized AI daily brief | 5–8 days | TBD | Per-user JSON profile → source buckets → consolidate → AI daily market brief (the product); prototype for Dee. **Deferred — digest email path ships first.** |
 | **Buffer** | 3 days | **Day 35** | Contingency for anti-bot arms race |
 
 **Total Estimated Duration:** ~5 weeks (1 developer full-time with Claude Code assistance).

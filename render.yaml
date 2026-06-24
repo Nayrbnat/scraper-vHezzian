@@ -1,0 +1,50 @@
+# Render Blueprint — lean Substack pipeline as run-once cron jobs against Neon.
+# Secrets (sync:false) are set in the Render dashboard, NEVER here. See DEPLOYMENT.md.
+services:
+  - type: cron
+    name: ingest
+    runtime: docker
+    dockerfilePath: deployment/Dockerfile.api
+    dockerContext: .
+    schedule: "0 6 * * *" # 06:00 UTC daily — scrape 50 Substacks into Neon
+    dockerCommand: scrapeforge pipeline ingest
+    envVars: &pipeline-env
+      - { key: DATABASE_URL, sync: false }
+      - { key: DATABASE_SSL, value: require }
+      - { key: STATE_STORE_KEY, sync: false }
+      - { key: SUMMARY_API_KEY, sync: false }
+      - { key: SUMMARY_MODEL, value: glm-4.5-flash }
+      - { key: SUMMARY_API_BASE_URL, value: https://api.z.ai/api/paas/v4 }
+      - { key: SUMMARY_PORTFOLIO, sync: false }
+      - { key: SUMMARY_INTERESTS, sync: false }
+      - { key: DIGEST_SMTP_HOST, sync: false }
+      - { key: DIGEST_SMTP_PORT, sync: false }
+      - { key: DIGEST_SMTP_USER, sync: false }
+      - { key: DIGEST_SMTP_PASSWORD, sync: false }
+      - { key: DIGEST_FROM, sync: false }
+      - { key: DIGEST_TO, sync: false }
+      - { key: DIGEST_SOURCE, value: postgres }
+  - type: cron
+    name: summarize
+    runtime: docker
+    dockerfilePath: deployment/Dockerfile.api
+    dockerContext: .
+    schedule: "30 6 * * *" # 06:30 UTC — summarize + score the new articles
+    dockerCommand: scrapeforge pipeline summarize
+    envVars: *pipeline-env
+  - type: cron
+    name: digest
+    runtime: docker
+    dockerfilePath: deployment/Dockerfile.api
+    dockerContext: .
+    schedule: "0 8 * * *" # 08:00 UTC — send the real relevance-ranked email
+    dockerCommand: scrapeforge digest send --yes --source postgres
+    envVars: *pipeline-env
+  - type: cron
+    name: init-db
+    runtime: docker
+    dockerfilePath: deployment/Dockerfile.api
+    dockerContext: .
+    schedule: "0 0 31 2 *" # never auto-runs (Feb 31). Trigger MANUALLY once on first deploy.
+    dockerCommand: scrapeforge pipeline init-db
+    envVars: *pipeline-env

@@ -15,6 +15,7 @@ import typer
 
 from scrapeforge.core.fingerprint_manager import FingerprintManager
 from scrapeforge.digest.cli import digest_app
+from scrapeforge.pipeline.cli import pipeline_app
 from scrapeforge.scrapers.community.cli import community_app
 from scrapeforge.scrapers.public.cli import public_app
 
@@ -24,6 +25,7 @@ app = typer.Typer(name="scrapeforge", help="Multi-bucket anti-detection scraper"
 app.add_typer(public_app, name="public")
 app.add_typer(community_app, name="community")
 app.add_typer(digest_app, name="digest")
+app.add_typer(pipeline_app, name="pipeline")
 
 
 # ---------------------------------------------------------------------------
