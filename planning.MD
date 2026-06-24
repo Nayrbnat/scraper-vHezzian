@@ -277,11 +277,32 @@ Only after this passes do we build the full proxy/humanize/escalation stack agai
 >   ingest) is an explicit carve-out — it is a direct batch read-modify-write over Postgres,
 >   not on the scraper→transform claim-check path.
 >
-> **Next phases:**
-> - **Phase 2.5 — Digest rendering:** the daily digest renders `summary.bullets` and sorts
->   articles by `relevance DESC` so the most actionable news appears first.
-> - **Phase 4 — Swipe UI:** the API exposes `relevance` + `summary` fields; the swipe-style
->   brief UI consumes them to present one card per article, pre-ranked for the owner.
+> **Next phase:** Phase 4 — Swipe UI: the API exposes `relevance` + `summary` fields; the
+> swipe-style brief UI consumes them to present one card per article, pre-ranked for the owner.
+
+---
+
+### Relevance Digest — Phase 2.5
+
+> ✅ **DELIVERED** (branch `feat/digest-relevance`). The daily digest now renders the
+> relevance-ranked `--source postgres` path alongside the existing `--source sample` CI path:
+>
+> - **`digest/relevance.py`** — `build_relevance_digest()`: pure filter (≥ `DIGEST_RELEVANCE_FLOOR`)
+>   → sort (`relevance DESC`, `fetched_at` tiebreak) → cap at `DIGEST_TOP_N` → single `"top"` section.
+> - **`digest/postgres_source.py`** — `load_ranked_articles()` async + `load_ranked_articles_sync()`
+>   bridge; inlined read-only window SQL (not in `repositories.py`; seam rule).
+> - **`digest/settings.py`** — `DigestSettings`: per-module `BaseSettings` fragment;
+>   `DIGEST_RELEVANCE_FLOOR=5`, `DIGEST_TOP_N=10`, `DIGEST_WINDOW_HOURS=48`.
+> - **`digest/models.py`** — `DigestItem` extended with `bullets: list[str]`, `relevance: int | None`,
+>   `reason: str | None`; `DigestSection.key` extended to include `"top"`.
+> - **`digest/renderer.py`** — bullets+badge+reason path when `item.bullets` non-empty; legacy
+>   keyword path unchanged; `_badge_html()` coloured pill (green/amber/grey).
+> - **`daily-digest.yml`** — `DIGEST_SOURCE` repo variable (defaults to `"sample"`; set to
+>   `"postgres"` + add `DATABASE_URL` secret to activate ranked digest in production).
+> - **Invariant #16 compliance:** `DigestSettings` is a per-module fragment; SQL is inlined in
+>   `postgres_source.py`; no edits to `core/engine.py`, `repositories.py`, or root `Settings`.
+>
+> **Next phase:** Phase 4 — Swipe UI (see below).
 
 ---
 
@@ -591,7 +612,8 @@ auth/StateStore (Phase 4) for gated sources; embeddings (Phase 8) for semantic r
 | Phase 2: Bucket 3 | 2–3 days | Day 9 | Public news scraper, CLI v1 |
 | Phase 3: Bucket 2 | 3–4 days | Day 12 | Reddit, Substack, WSO scrapers |
 | Phase 3.6: Community ingestion Phase 1 | ✅ delivered | — | Lean scheduled ingestion of 50 curated Substacks → Postgres via INGEST queue; next: AI summaries → ranking → brief UI |
-| AI Summaries + Relevance (Phase 2) | ✅ delivered | — | `core/llm/` port + GLM-4.5-Flash adapter; `relevance` INT + `summary` JSONB columns; batch summarize worker; idempotent migrations; next: Phase 2.5 digest rendering → Phase 4 swipe UI |
+| AI Summaries + Relevance (Phase 2) | ✅ delivered | — | `core/llm/` port + GLM-4.5-Flash adapter; `relevance` INT + `summary` JSONB columns; batch summarize worker; idempotent migrations |
+| Relevance Digest (Phase 2.5) | ✅ delivered | — | `digest/relevance.py` + `postgres_source.py` + `settings.py`; `DigestItem` bullets/relevance/reason; renderer badge+bullets path; `DIGEST_SOURCE` workflow variable; next: Phase 4 swipe UI |
 | Phase 4: Bucket 1 | 5–7 days | Day 19 | Premium paywall scraper, auth system |
 | Phase 5: Integration | 3–4 days | Day 23 | Engine, docs, performance, final QA |
 | Phase 6: Serving API & Datastore | 4–6 days | Day 29 | Postgres, PostgresSink, FastAPI read+jobs, workers |

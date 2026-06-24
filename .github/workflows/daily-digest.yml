@@ -9,8 +9,16 @@ name: Daily digest
 # workflow_dispatch (manual) always sends, regardless of the hour.
 #
 # Requires repo secrets: DIGEST_SMTP_USER, DIGEST_SMTP_PASSWORD (Gmail app password), DIGEST_TO, DIGEST_FROM.
-# NOTE: until Phase 9 (source buckets + AI brief) lands, this sends the BUNDLED SAMPLE digest —
-# it proves the daily delivery cadence. Swap `--source sample` for a real corpus later.
+# NOTE: the source for the daily digest is controlled by the DIGEST_SOURCE repo variable (Settings >
+# Variables > Actions). It defaults to "sample" so CI stays green with no Postgres required.
+# To switch to the real relevance-ranked digest once a production Postgres + ingestion pipeline are
+# running:
+#   1. Set the DIGEST_SOURCE repo variable to "postgres".
+#   2. Add a DATABASE_URL repo secret pointing at the production Postgres instance
+#      (postgresql+asyncpg://user:pass@host:port/db).
+# The workflow passes DATABASE_URL from secrets; it is ignored (empty) when source is "sample".
+# IMPORTANT: when DIGEST_SOURCE=postgres you MUST set the DATABASE_URL secret — an unset secret
+# resolves to an empty string and overrides the app's default DSN, so the connection fails.
 
 on:
   schedule:
@@ -71,4 +79,8 @@ jobs:
           DIGEST_TO: ${{ secrets.DIGEST_TO }}
           # Not used by the digest path, but set so any Settings import can't fail (non-secret placeholder).
           STATE_STORE_KEY: ci-digest-placeholder-not-used-000000000000
-        run: python -m scrapeforge digest send --yes --source sample
+          # Source defaults to "sample" (no Postgres in CI). Set the DIGEST_SOURCE repo variable to
+          # "postgres" and add a DATABASE_URL secret to send the real relevance-ranked digest.
+          DIGEST_SOURCE: ${{ vars.DIGEST_SOURCE || 'sample' }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python -m scrapeforge digest send --yes --source "$DIGEST_SOURCE"

@@ -124,6 +124,16 @@ scrapeforge/
 │   ├── state_store.py              # StateStore: encrypted Fernet vault for session states
 │   └── sso_handler.py              # SSOHandler: interactive login (VNC / headful Chrome)
 │
+├── digest/                         # === RELEVANCE DIGEST (Phase 2.5) ===
+│   ├── __init__.py
+│   ├── models.py                   # DigestItem (+ bullets/relevance/reason fields), DigestSection (key inc. "top"), Digest
+│   ├── renderer.py                 # render_html() / render_text(): bullets+badge+reason path + legacy keyword path
+│   ├── sample_data.py              # built-in sample articles for --source sample (CI-safe, no DB)
+│   ├── relevance.py                # build_relevance_digest(): pure filter→sort→cap→wrap function (Phase 2.5)
+│   ├── postgres_source.py          # load_ranked_articles() async + load_ranked_articles_sync() bridge; inlined SQL (Phase 2.5)
+│   ├── settings.py                 # DigestSettings: per-module BaseSettings fragment (DIGEST_RELEVANCE_FLOOR/TOP_N/WINDOW_HOURS)
+│   └── cli.py                      # Typer sub-app: `digest send --source [sample|postgres] --yes`
+│
 ├── utils/                          # === UTILITIES ===
 │   ├── __init__.py
 │   ├── humanize.py                 # MousePathGenerator, ScrollSimulator, DelayEngine
@@ -197,6 +207,12 @@ scrapeforge/
 | `core/llm/exceptions.py` | `LLMError`, `LLMRateLimitError`, `LLMParseError` — subclass `ScrapeForgeError`; never edit `exceptions.py` | `openai_compatible.py`, worker | **Phase 2 — keep** |
 | `worker/summarize_worker.py` | Phase 2 batch worker: `SELECT WHERE summary IS NULL` → LLM call → `UPDATE relevance+summary`; rate-limit stops run; parse errors skip row | Postgres, `core/llm/` | **Phase 2 — keep** |
 | `worker/run_summarize.py` | Deployment entry point for summarizer poll loop (`python -m scrapeforge.worker.run_summarize`); calls migrations at startup | ops | **Phase 2 — keep** |
+| `digest/models.py` | `DigestItem` (+ `bullets`/`relevance`/`reason` fields), `DigestSection` (key extended to include `"top"`), `Digest` | `renderer.py`, `relevance.py`, CLI | **Phase 2.5 — keep** |
+| `digest/relevance.py` | `build_relevance_digest()`: pure filter (≥ floor) → sort (relevance DESC, recency tiebreak) → cap → wrap in `"top"` section | `digest/cli.py` | **Phase 2.5 — keep** |
+| `digest/postgres_source.py` | `load_ranked_articles()` async + `load_ranked_articles_sync()` bridge; inlined SQL window query, relevance-ranked; not in `repositories.py` (seam rule) | `digest/cli.py` | **Phase 2.5 — keep** |
+| `digest/settings.py` | `DigestSettings`: per-module `BaseSettings` fragment; `DIGEST_RELEVANCE_FLOOR` (5), `DIGEST_TOP_N` (10), `DIGEST_WINDOW_HOURS` (48) | `digest/cli.py`, `postgres_source.py` | **Phase 2.5 — keep** |
+| `digest/renderer.py` | `render_html()` / `render_text()`: bullets+badge+reason path when `item.bullets` non-empty; legacy keyword path otherwise; `_badge_html()` coloured pill | `digest/cli.py` | **Phase 2.5 — keep** |
+| `digest/cli.py` | Typer sub-app: `digest send --source [sample|postgres] --yes`; mounted by root `cli.py` | ops, CI | **Phase 2.5 — keep** |
 | `api/` | FastAPI serving plane: read + enqueue only; never drives a browser | external clients | **Serving — keep** |
 | `worker/` | arq workers + scheduler: consume jobs → `ScrapeEngine` → `PostgresSink` | queue | **Ingestion — keep** |
 | `deployment/` | Docker Compose + Dockerfiles + Caddy (single-VPS host) | ops | **Infra — keep** |
@@ -562,6 +578,26 @@ Postgres row. Rate-limit 429s stop the current run; LLM parse errors skip the ro
 to avoid re-queuing permanently-broken articles). `core/db/migrations.py` adds the two new
 columns idempotently at startup. Deployment: `python -m scrapeforge.worker.run_summarize`
 (separate `summarizer` service in `docker-compose.yml`).
+
+**Relevance digest (Phase 2.5).** `digest/cli.py` exposes `scrapeforge digest send --source
+[sample|postgres] --yes`.  When `--source postgres`, `digest/postgres_source.py` issues a
+single read-only window query (inlined SQL; not in `repositories.py`):
+
+```sql
+SELECT id, title, url, published_at, fetched_at, relevance, summary
+FROM articles
+WHERE relevance IS NOT NULL
+  AND fetched_at >= NOW() - INTERVAL '<window_hours> hours'
+ORDER BY relevance DESC, fetched_at DESC
+LIMIT <top_n>;
+```
+
+Results are passed to `build_relevance_digest()` (`digest/relevance.py`) which filters to
+`relevance >= DIGEST_RELEVANCE_FLOOR`, then to the renderer (`digest/renderer.py`) which
+produces bullets+badge+reason HTML/text.  The digest is emailed via SMTP (existing send path,
+unchanged).  This is a **read-only CLI carve-out** from the pipeline — it never enqueues jobs
+or writes Postgres.  CI keeps `--source sample`; production sets the `DIGEST_SOURCE` repo
+variable to `"postgres"` (see `daily-digest.yml` NOTE block and SPEC §3.25).
 
 ### Endpoints
 

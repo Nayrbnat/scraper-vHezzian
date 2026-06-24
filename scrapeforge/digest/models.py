@@ -89,6 +89,11 @@ class DigestItem(BaseModel):
         default_factory=list,
         description="Which preference values this item matched (company/theme/topic).",
     )
+    bullets: list[str] = Field(
+        default_factory=list, description="AI 5-bullet summary (empty for the keyword path)."
+    )
+    relevance: int | None = Field(default=None, description="AI relevance score 1-10, or None.")
+    reason: str | None = Field(default=None, description="One-line 'why this score', or None.")
 
 
 class DigestSection(BaseModel):
@@ -96,7 +101,7 @@ class DigestSection(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    key: Literal["portfolio", "themes", "topics"]
+    key: Literal["portfolio", "themes", "topics", "top"]
     heading: str
     items: list[DigestItem] = Field(default_factory=list)
 

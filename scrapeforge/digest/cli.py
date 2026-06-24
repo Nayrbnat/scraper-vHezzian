@@ -32,7 +32,11 @@ def preview(
     subscriber: Path = typer.Option(  # noqa: B008
         Path("data/subscribers/dee.json"), "--subscriber", "-s", help="Seeded subscriber JSON"
     ),
-    source: str = typer.Option("sample", "--source", help="'sample' or 'jsonl:<path>'"),
+    source: str = typer.Option(
+        "sample",
+        "--source",
+        help="'sample', 'jsonl:<path>', or 'postgres' (relevance-ranked from the DB)",
+    ),
     out_dir: Path = typer.Option(  # noqa: B008
         Path("./output/digests"), "--out-dir", "-o", help="Where to write the preview HTML"
     ),
@@ -52,7 +56,11 @@ def send(
     subscriber: Path = typer.Option(  # noqa: B008
         Path("data/subscribers/dee.json"), "--subscriber", "-s"
     ),
-    source: str = typer.Option("sample", "--source"),
+    source: str = typer.Option(
+        "sample",
+        "--source",
+        help="'sample', 'jsonl:<path>', or 'postgres' (relevance-ranked from the DB)",
+    ),
     yes: bool = typer.Option(False, "--yes", help="Skip the confirmation prompt"),
 ) -> None:
     """Send the digest for real via SMTP (requires DIGEST_SMTP_* env / .env)."""

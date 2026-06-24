@@ -133,7 +133,7 @@ class TestRender:
     def test_empty_digest_renders_gracefully(self) -> None:
         digest = build_digest(_sub(), [])  # no prefs, no articles
         email = render_email(digest)
-        assert "No new updates" in email.text
+        assert "No updates to show right now." in email.text
         assert "(0 updates)" in email.subject
 
     def test_html_escapes_article_content(self) -> None:
