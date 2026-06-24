@@ -5,10 +5,14 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from scrapeforge.core.db.models import Article
+from scrapeforge.core.db.models import (
+    Article,
+    UserProfile,
+    UserProfileVector,
+)
 from scrapeforge.core.embeddings.base import Embedder
 
 
@@ -91,3 +95,72 @@ async def test_embed_articles_idempotent(db_session, session_factory) -> None:
         session_factory=session_factory, embedder=FakeEmbedder(), batch_size=10
     )
     assert n2 == 0  # nothing left WHERE embedding IS NULL
+
+
+async def _add_profile(session_factory, *, user_id, portfolio, sectors, focus=None) -> None:
+    async with session_factory() as s:
+        s.add(
+            UserProfile(
+                user_id=user_id,
+                portfolio=portfolio,
+                sectors=sectors,
+                focus=focus,
+                updated_at=datetime.now(UTC),
+            )
+        )
+        await s.commit()
+
+
+@pytest.mark.db
+async def test_embed_profiles_embeds_then_skips_unchanged(db_session, session_factory) -> None:
+    from scrapeforge.pipeline.embeddings_jobs import embed_profiles
+
+    await _add_profile(session_factory, user_id="u1", portfolio=["NVDA"], sectors=["AI"])
+    fake = FakeEmbedder()
+
+    n1 = await embed_profiles(session_factory=session_factory, embedder=fake)
+    assert n1 == 1
+    vec = (await db_session.execute(select(UserProfileVector))).scalar_one()
+    assert vec.user_id == "u1"
+    assert vec.source_hash  # non-empty
+
+    n2 = await embed_profiles(session_factory=session_factory, embedder=fake)
+    assert n2 == 0  # unchanged profile → skipped
+
+
+@pytest.mark.db
+async def test_embed_profiles_reembeds_on_change(db_session, session_factory) -> None:
+    from scrapeforge.pipeline.embeddings_jobs import embed_profiles
+
+    await _add_profile(session_factory, user_id="u1", portfolio=["NVDA"], sectors=["AI"])
+    await embed_profiles(session_factory=session_factory, embedder=FakeEmbedder())
+
+    async with session_factory() as s:
+        await s.execute(
+            update(UserProfile).where(UserProfile.user_id == "u1").values(sectors=["OIL"])
+        )
+        await s.commit()
+
+    n = await embed_profiles(session_factory=session_factory, embedder=FakeEmbedder())
+    assert n == 1  # hash changed → re-embedded
+    vec = (await db_session.execute(select(UserProfileVector))).scalar_one()
+    assert list(vec.embedding)[1] == 1.0  # "OIL" → y-axis
+
+
+@pytest.mark.db
+async def test_seed_owner_upserts_from_settings(db_session, session_factory) -> None:
+    from scrapeforge.core.llm.settings import SummarizerSettings
+    from scrapeforge.pipeline.embeddings_jobs import seed_owner
+
+    settings = SummarizerSettings(
+        SUMMARY_PORTFOLIO="NVDA, MSFT", SUMMARY_INTERESTS="AI, fintech", SUMMARY_FOCUS="ai finance"
+    )
+    await seed_owner(session_factory=session_factory, settings=settings)
+    await seed_owner(session_factory=session_factory, settings=settings)  # idempotent
+
+    rows = (await db_session.execute(select(UserProfile))).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].user_id == "owner"
+    assert rows[0].portfolio == ["NVDA", "MSFT"]
+    assert rows[0].sectors == ["AI", "fintech"]
+    assert rows[0].focus == "ai finance"
