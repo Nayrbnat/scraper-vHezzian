@@ -31,11 +31,15 @@ async def init_db(engine: AsyncEngine) -> None:
     log.info("init_db: schema ready (vector ext + tables + summary columns)")
 
 
-async def ingest_publications(*, session_factory, scraper, sources, limit: int) -> int:
+async def ingest_publications(
+    *, session_factory, scraper, sources, limit: int, via_rss: bool = False
+) -> int:
     """Scrape each publication and UPSERT its successful articles into Postgres.
 
-    Lean path — no queue, no object store. Reuses ``scrape_publication`` + ``PostgresSink``
-    (idempotent UPSERT on sha256(url)). Returns the number of articles persisted.
+    Lean path — no queue, no object store. Reuses ``PostgresSink`` (idempotent UPSERT on
+    sha256(url)). When *via_rss* is set, scrape each publication's RSS feed
+    (``scrape_publication_via_rss``) instead of the rate-limited JSON API
+    (``scrape_publication``). Returns the number of articles persisted.
     """
     sink = PostgresSink(session_factory)
     persisted = 0
@@ -44,7 +48,10 @@ async def ingest_publications(*, session_factory, scraper, sources, limit: int) 
         # One publication's failure (HTTP 429, Cloudflare challenge, driver error) must not
         # abort the whole run — log it and move on so the other publications still ingest.
         try:
-            results = await scraper.scrape_publication(source.base, limit=limit)
+            if via_rss:
+                results = await scraper.scrape_publication_via_rss(source.base, limit=limit)
+            else:
+                results = await scraper.scrape_publication(source.base, limit=limit)
         except ScrapeForgeError as exc:
             failed += 1
             log.warning("ingest: skipping %s — scrape failed: %s", source.base, exc)

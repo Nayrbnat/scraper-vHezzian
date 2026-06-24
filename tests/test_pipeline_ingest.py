@@ -73,6 +73,40 @@ class _FlakyScraper:
         ]
 
 
+class _RssScraper:
+    """Has only scrape_publication_via_rss — proves the via_rss path calls the RSS method."""
+
+    async def scrape_publication_via_rss(self, target, limit=25):  # noqa: ARG002
+        return [
+            ScrapeResult(
+                status="success",
+                driver_used="curl_cffi",
+                article=Article(
+                    url=f"https://{target}/p/rss",
+                    title="via rss",
+                    content="Body.",
+                    metadata={"bucket": "community", "source_domain": target, "via": "rss"},
+                ),
+            )
+        ]
+
+
+@pytest.mark.db
+async def test_ingest_publications_via_rss_uses_rss_method(db_session, session_factory) -> None:
+    from scrapeforge.pipeline.jobs import ingest_publications
+
+    n = await ingest_publications(
+        session_factory=session_factory,
+        scraper=_RssScraper(),
+        sources=[_FakeSub("a.com"), _FakeSub("b.com")],
+        limit=5,
+        via_rss=True,
+    )
+    assert n == 2
+    total = await db_session.scalar(select(func.count()).select_from(ArticleRow))
+    assert total == 2
+
+
 @pytest.mark.db
 async def test_ingest_publications_skips_failing_publication(db_session, session_factory) -> None:
     """One publication raising (e.g. HTTP 429) must NOT abort the whole batch."""

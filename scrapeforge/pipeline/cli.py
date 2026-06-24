@@ -43,6 +43,11 @@ def ingest_cmd(
     limit: int = typer.Option(25, "--limit", "-l", help="Max posts per publication"),
     sector: str | None = typer.Option(None, "--sector", "-s", help="Only this sector"),
     max_pubs: int | None = typer.Option(None, "--max", "-m", help="Cap number of publications"),
+    rss: bool = typer.Option(
+        True,
+        "--rss/--no-rss",
+        help="Use RSS feeds (avoids the /api/v1 rate limits) instead of the JSON API.",
+    ),
 ) -> None:
     """Scrape the curated Substacks straight into Postgres (no Redis/MinIO)."""
     _use_selector_loop()
@@ -62,12 +67,14 @@ def ingest_cmd(
                 scraper=SubstackScraper(),
                 sources=sources,
                 limit=limit,
+                via_rss=rss,
             )
         finally:
             await engine.dispose()
 
     n = asyncio.run(_run())
-    typer.echo(f"ingest: persisted {n} articles from {len(sources)} publication(s).")
+    mode = "RSS" if rss else "JSON API"
+    typer.echo(f"ingest: persisted {n} articles from {len(sources)} publication(s) via {mode}.")
 
 
 @pipeline_app.command("summarize")

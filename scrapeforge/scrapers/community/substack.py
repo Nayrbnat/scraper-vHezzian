@@ -324,6 +324,34 @@ class SubstackScraper(CommunityScraper):
         return results[:limit]
 
     # ------------------------------------------------------------------
+    # RSS publication scrape (avoids the rate-limited /api/v1 endpoints)
+    # ------------------------------------------------------------------
+
+    async def _fetch_raw(self, url: str) -> str:
+        """Fetch *url* via the bridge and return the raw response body as a string.
+
+        The raw-string twin of ``_fetch_json`` — used for the RSS feed (XML, not JSON). Same
+        one-shot bridge lifecycle (Invariant #7): reuse an injected bridge, else create a per-call one.
+        """
+        bridge = self.bridge if self.bridge is not None else self._create_default_bridge(self.proxy)
+        async with bridge as b:
+            await b.navigate(url)
+            return await b.get_html()
+
+    async def scrape_publication_via_rss(self, pub: str, *, limit: int = 25) -> list[ScrapeResult]:
+        """Scrape up to *limit* public posts from a publication's RSS feed (``<base>/feed``).
+
+        One request per publication (the feed lists ~20 recent posts with their bodies inline),
+        so it never touches the rate-limited archive/post JSON endpoints. Items whose feed body
+        is truncated below ``_MIN_CONTENT_LENGTH`` are skipped (too little text to summarize).
+        """
+        from scrapeforge.scrapers.community.substack_rss import parse_substack_feed
+
+        base = self._normalize_base(pub)
+        xml = await self._fetch_raw(f"{base}/feed")
+        return parse_substack_feed(xml, limit=limit, min_chars=_MIN_CONTENT_LENGTH)
+
+    # ------------------------------------------------------------------
     # Single-URL scrape (engine routing entry point)
     # ------------------------------------------------------------------
 
