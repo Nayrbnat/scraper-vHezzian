@@ -1454,6 +1454,119 @@ mirrors the shape of `run_transform.py`, and invokes `core/db/migrations.py` at 
 
 ---
 
+### 3.25 Relevance Digest — `--source postgres` Path (`digest/`) — Phase 2.5
+
+**Responsibility:** once-daily relevance-ranked email digest.  The `digest send` CLI command
+has two source paths:
+
+- `--source sample` (default; CI-safe): renders the built-in sample data, no DB.
+- `--source postgres`: queries Postgres for articles enriched by the summarizer (Phase 2),
+  ranks by `relevance` score, and renders a bullets+badge+reason email.
+
+The postgres path is entirely **read-only**; it never writes to any table.
+
+#### `DigestSettings` (per-module fragment, `digest/settings.py`)
+
+Per-module `BaseSettings` fragment — does **not** extend or modify the core `Settings` class
+(Invariant #16). Reads from the same `.env` / repo secrets.
+
+| Variable | Default | Description |
+|---|---|---|
+| `DIGEST_RELEVANCE_FLOOR` | `5` | Minimum relevance score (inclusive) to include an article |
+| `DIGEST_TOP_N` | `10` | Maximum articles in the ranked digest |
+| `DIGEST_WINDOW_HOURS` | `48` | Look-back window (hours from now) when querying Postgres |
+
+#### `DigestItem` extended fields (`digest/models.py`)
+
+Three new fields added to the `DigestItem` dataclass (all optional; absent on the legacy
+keyword path):
+
+```python
+bullets:   list[str]      = field(default_factory=list)  # 5 investor-focused bullet points
+relevance: int | None     = None                          # 1–10 overall score
+reason:    str | None     = None                          # one-sentence relevance explanation
+```
+
+#### `DigestSection.key` extension
+
+`DigestSection.key` is extended from `Literal["portfolio","themes","topics"]` to also
+accept `"top"`. The `build_relevance_digest()` function returns a single section with
+`key="top"` and a display title of `"Top Stories"`.
+
+#### `build_relevance_digest()` (`digest/relevance.py`)
+
+Pure function; no I/O:
+
+```python
+def build_relevance_digest(
+    articles: Sequence[ArticleRow],
+    *,
+    min_relevance: int = 5,
+    limit: int = 10,
+) -> Digest:
+```
+
+Behaviour:
+1. Filters `articles` to those with `relevance >= min_relevance`.
+2. Sorts descending by `relevance`; uses `fetched_at` as a recency tiebreak.
+3. Caps at `limit` items.
+4. Wraps items in a single `DigestSection(key="top", title="Top Stories")`.
+5. Returns a `Digest` containing that one section.
+
+#### `load_ranked_articles()` / `load_ranked_articles_sync()` (`digest/postgres_source.py`)
+
+Inlined async SQL query — **not** in `repositories.py` (seam rule: each module owns its own
+queries; see Invariant #16).
+
+```python
+async def load_ranked_articles(
+    db_url: str,
+    *,
+    window_hours: int = 48,
+    top_n: int = 10,
+) -> list[ArticleRow]:
+    """Async: fetch top-N scored articles from the last window_hours."""
+
+def load_ranked_articles_sync(
+    db_url: str,
+    *,
+    window_hours: int = 48,
+    top_n: int = 10,
+) -> list[ArticleRow]:
+    """Sync bridge — calls asyncio.run(); for use in CLI entry-points only."""
+```
+
+The query selects `id, title, url, published_at, fetched_at, relevance, summary` from
+`articles` where `relevance IS NOT NULL` and `fetched_at >= NOW() - INTERVAL '<window_hours> hours'`,
+ordered by `relevance DESC, fetched_at DESC`, limited to `top_n`.  The `summary` JSONB column is
+parsed to extract `bullets` and `reason` fields into the returned `ArticleRow` objects.
+
+`asyncio.run()` is allowed **only** in `load_ranked_articles_sync` (CLI entry-point bridge);
+it is never called inside a running event loop.
+
+#### Renderer behaviour (`digest/renderer.py`)
+
+The renderer (`render_html()` / `render_text()`) branches on `item.bullets`:
+
+- **Bullets path** (`item.bullets` non-empty): renders each bullet as an `<li>` element,
+  appends a relevance badge (`_badge_html(relevance)`) showing the score, and appends
+  `item.reason` as a muted one-line caption.
+- **Legacy keyword path** (`item.bullets` empty): original keyword-list rendering, unchanged.
+
+`_badge_html(relevance: int | None) -> str` — returns an inline HTML `<span>` styled as a
+coloured pill: green (8–10), amber (5–7), grey (< 5 or `None`).
+
+Empty-state copy (no items after filtering): `"No updates to show right now."`
+
+#### Daily workflow integration
+
+The `daily-digest.yml` GitHub Actions workflow reads the `DIGEST_SOURCE` **repo variable**
+(Settings → Variables → Actions).  It defaults to `"sample"` so CI stays green without
+Postgres.  Set `DIGEST_SOURCE=postgres` and add a `DATABASE_URL` repo secret to activate the
+relevance-ranked digest in production (see the NOTE block at the top of the workflow file).
+
+---
+
 ## 4. Humanization Utilities
 
 ### 4.1 `MousePathGenerator`
@@ -1797,3 +1910,7 @@ class RedditSettings(BaseSettings):
     `summary` on the same row. This is the same class of carve-out as community ingestion: the
     pipeline decoupling governs the *ingest* path only. Post-ingest enrichment workers that
     read from and write back to Postgres are explicitly permitted.
+
+    **Relevance digest carve-out (Phase 2.5).** `digest/postgres_source.py` is a read-only
+    async query over Postgres (inlined SQL — not in `repositories.py`); it is consumed by the
+    once-daily `digest send` CLI command, not by any pipeline worker. See §3.25.
