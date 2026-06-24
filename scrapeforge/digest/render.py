@@ -31,21 +31,61 @@ def _subject(digest: Digest) -> str:
 def render_text(digest: Digest) -> str:
     lines = [f"{_BRAND} — {digest.period}", "", f"Hi {digest.subscriber_name},", ""]
     if digest.is_empty:
-        lines += ["No new updates matched your preferences today.", ""]
+        lines += ["No updates to show right now.", ""]
     for section in digest.sections:
         lines.append(section.heading.upper())
         for item in section.items:
-            tag = f"  [{', '.join(item.matched_on)}]" if item.matched_on else ""
-            lines.append(f"- {item.title}{tag}")
-            lines.append(f"  {item.source} — {item.url}")
-            lines.append(f"  {item.summary}")
-            lines.append("")
+            if item.bullets:
+                badge = f"[{item.relevance}/10] " if item.relevance is not None else ""
+                lines.append(f"- {badge}{item.title}")
+                lines.append(f"  {item.source} — {item.url}")
+                for b in item.bullets:
+                    lines.append(f"  • {b}")
+                if item.reason:
+                    lines.append(f"  why: {item.reason}")
+                lines.append("")
+            else:
+                tag = f"  [{', '.join(item.matched_on)}]" if item.matched_on else ""
+                lines.append(f"- {item.title}{tag}")
+                lines.append(f"  {item.source} — {item.url}")
+                lines.append(f"  {item.summary}")
+                lines.append("")
         lines.append("")
     lines += ["—", f"You're receiving this because you signed up for {_BRAND} updates."]
     return "\n".join(lines)
 
 
+def _badge_html(relevance: int | None) -> str:
+    if relevance is None:
+        return ""
+    color = "#16a34a" if relevance >= 8 else "#d97706" if relevance >= 5 else "#6b7280"
+    return (
+        f'<span style="display:inline-block;background:{color};color:#fff;border-radius:10px;'
+        f'padding:1px 8px;font-size:12px;font-weight:600;margin-right:8px;">{relevance}/10</span>'
+    )
+
+
 def _html_item(item) -> str:
+    if item.bullets:
+        bullets = "".join(f'<li style="margin:2px 0;">{escape(b)}</li>' for b in item.bullets)
+        why = (
+            f'<div style="font-size:12px;color:#9ca3af;margin-top:6px;">'
+            f"why: {escape(item.reason)}</div>"
+            if item.reason
+            else ""
+        )
+        return (
+            '<div style="margin:0 0 18px;padding:0 0 14px;border-bottom:1px solid #eee;">'
+            f"{_badge_html(item.relevance)}"
+            f'<a href="{escape(item.url)}" style="font-size:16px;font-weight:600;'
+            f'color:#111;text-decoration:none;">{escape(item.title)}</a>'
+            f'<div style="font-size:12px;color:#888;margin:2px 0;">{escape(item.source)}</div>'
+            f'<ul style="font-size:14px;color:#333;line-height:1.5;margin:6px 0;'
+            f'padding-left:20px;">{bullets}</ul>'
+            f"{why}"
+            "</div>"
+        )
+    # --- legacy keyword path (unchanged) ---
     tag = ""
     if item.matched_on:
         chips = " ".join(
@@ -74,10 +114,7 @@ def _html_section(section) -> str:
 
 
 def render_html(digest: Digest) -> str:
-    empty = (
-        '<p style="font-size:15px;color:#374151;">'
-        "No new updates matched your preferences today.</p>"
-    )
+    empty = '<p style="font-size:15px;color:#374151;">No updates to show right now.</p>'
     body = empty if digest.is_empty else "".join(_html_section(s) for s in digest.sections)
     period = escape(digest.period)
     name = escape(digest.subscriber_name)
