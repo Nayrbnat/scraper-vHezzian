@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select, update
@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from scrapeforge.core.db.models import (
     Article,
+    UserArticleRelevance,
     UserProfile,
     UserProfileVector,
 )
@@ -164,3 +165,58 @@ async def test_seed_owner_upserts_from_settings(db_session, session_factory) -> 
     assert rows[0].portfolio == ["NVDA", "MSFT"]
     assert rows[0].sectors == ["AI", "fintech"]
     assert rows[0].focus == "ai finance"
+
+
+@pytest.mark.db
+async def test_score_users_ranks_per_user_and_isolates(db_session, session_factory) -> None:
+    from scrapeforge.pipeline.embeddings_jobs import score_users
+
+    now = datetime.now(UTC)
+    ai_vec = [1.0, 0.0, 0.0] + [0.0] * 1533
+    oil_vec = [0.0, 1.0, 0.0] + [0.0] * 1533
+    await _add_article(
+        session_factory, id_="a" * 64, title="AI", content="x", fetched_at=now, embedding=ai_vec
+    )
+    await _add_article(
+        session_factory, id_="o" * 64, title="OIL", content="x", fetched_at=now, embedding=oil_vec
+    )
+    async with session_factory() as s:
+        s.add(
+            UserProfileVector(user_id="ai_user", embedding=ai_vec, source_hash="h", updated_at=now)
+        )
+        s.add(
+            UserProfileVector(
+                user_id="oil_user", embedding=oil_vec, source_hash="h", updated_at=now
+            )
+        )
+        await s.commit()
+
+    n = await score_users(session_factory=session_factory, window_days=30, top_k=1)
+    assert n == 2  # one top row per user
+
+    rows = (await db_session.execute(select(UserArticleRelevance))).scalars().all()
+    by_user = {r.user_id: r.article_id for r in rows}
+    assert by_user["ai_user"] == "a" * 64  # AI user's top match is the AI article
+    assert by_user["oil_user"] == "o" * 64  # isolation: oil user gets the oil article
+
+
+@pytest.mark.db
+async def test_score_users_respects_window(db_session, session_factory) -> None:
+    from scrapeforge.pipeline.embeddings_jobs import score_users
+
+    now = datetime.now(UTC)
+    ai_vec = [1.0, 0.0, 0.0] + [0.0] * 1533
+    await _add_article(
+        session_factory,
+        id_="old" + "a" * 61,
+        title="AI",
+        content="x",
+        fetched_at=now - timedelta(days=99),
+        embedding=ai_vec,
+    )
+    async with session_factory() as s:
+        s.add(UserProfileVector(user_id="u", embedding=ai_vec, source_hash="h", updated_at=now))
+        await s.commit()
+
+    n = await score_users(session_factory=session_factory, window_days=30, top_k=10)
+    assert n == 0  # the only article is older than the 30-day window

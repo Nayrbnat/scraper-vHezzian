@@ -9,13 +9,13 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from scrapeforge.core.db.models import Article, UserProfile, UserProfileVector
+from scrapeforge.core.db.models import Article, UserArticleRelevance, UserProfile, UserProfileVector
 from scrapeforge.core.embeddings.base import Embedder
 
 log = logging.getLogger(__name__)
@@ -152,3 +152,52 @@ async def seed_owner(*, session_factory: async_sessionmaker[AsyncSession], setti
         await session.execute(stmt)
         await session.commit()
     log.info("seed_owner: upserted owner profile")
+
+
+async def score_users(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    window_days: int,
+    top_k: int,
+) -> int:
+    """Rank recent articles per user by cosine similarity; UPSERT top-K. Returns rows written."""
+    cutoff = datetime.now(UTC) - timedelta(days=window_days)
+    now = datetime.now(UTC)
+
+    async with session_factory() as session:
+        users = (
+            await session.execute(select(UserProfileVector.user_id, UserProfileVector.embedding))
+        ).all()
+
+    written = 0
+    for user_id, uvec in users:
+        uvec_list = list(uvec)
+        distance = Article.embedding.cosine_distance(uvec_list)
+        async with session_factory() as session:
+            ranked = (
+                await session.execute(
+                    select(Article.id, distance.label("dist"))
+                    .where(Article.embedding.is_not(None), Article.fetched_at >= cutoff)
+                    .order_by(distance)
+                    .limit(top_k)
+                )
+            ).all()
+            for article_id, dist in ranked:
+                stmt = pg_insert(UserArticleRelevance).values(
+                    user_id=user_id,
+                    article_id=article_id,
+                    score=1.0 - float(dist),
+                    computed_at=now,
+                )
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=[
+                        UserArticleRelevance.user_id,
+                        UserArticleRelevance.article_id,
+                    ],
+                    set_={"score": stmt.excluded.score, "computed_at": stmt.excluded.computed_at},
+                )
+                await session.execute(stmt)
+                written += 1
+            await session.commit()
+    log.info("score_users: wrote %d (user, article) score(s)", written)
+    return written
