@@ -52,25 +52,37 @@ def _build_messages(
     portfolio: list[str],
     interests: list[str],
     max_chars: int,
+    focus: str = "artificial intelligence and finance",
 ) -> list[dict]:
     today = datetime.now(UTC).date().isoformat()
     pub = published.date().isoformat() if published else "unknown"
     port = ", ".join(portfolio) or "(none given)"
     inter = ", ".join(interests) or "(none given)"
     system = (
-        "You are an equity analyst scoring and summarizing articles for a specific investor. "
-        f"The investor's portfolio: {port}. The investor's stated interests (including niche "
-        f"topics): {inter}. Today's date is {today}; the article was published {pub}. "
-        "Produce: (a) exactly 5 short bullets (<=25 words each) capturing the core claim/thesis, "
-        "the company/ticker or sector, the key number or catalyst, the bull/bear angle, and why "
-        "it matters; (b) integer 1-10 sub-scores for relevance (about AI, finance, the portfolio, "
-        "or secular industry shifts), credibility (famous/respected Substack or leading "
-        "researcher), intensity (fundraising / new investment / collaboration / technological "
-        "breakthrough rank high), personal (matches the investor's stated interests, niche ones "
-        "count), time (imminent/time-sensitive events rank high); (c) an overall relevance 1-10 "
-        "weighing those for THIS investor; (d) a one-line reason. Return ONLY a JSON object: "
-        '{"bullets":[5 strings],"scores":{"relevance":n,"credibility":n,"intensity":n,'
-        '"personal":n,"time":n},"relevance":n,"reason":"..."}.'
+        f"You are an equity analyst preparing a daily briefing for an investor focused on {focus}. "
+        f"The investor's portfolio: {port}. Stated interests (incl. niche topics): {inter}. "
+        f"Today is {today}; this article was published {pub}.\n\n"
+        "Write EXACTLY 5 bullets. Rules for the bullets:\n"
+        "- Each bullet is a DISTINCT, self-contained takeaway — no overlap between bullets, no "
+        "filler, no generic phrasing, and do NOT just restate the headline.\n"
+        "- Be concrete and specific: name the company/ticker/sector and cite the key number, "
+        "date, or catalyst. Lead with the substance, not 'The article discusses...'.\n"
+        "- <= 25 words each.\n"
+        "Cover these five angles, in this order, one per bullet:\n"
+        "  1. The single core claim or thesis.\n"
+        "  2. The most important hard number, metric, or financial figure.\n"
+        "  3. The specific catalyst, event, or change driving it.\n"
+        "  4. The bull-vs-bear or key-risk angle.\n"
+        "  5. The forward implication — what to watch next, or why it matters now.\n\n"
+        f"Then score the article 1-10 on each: relevance (how directly it concerns {focus} — this "
+        "is the PRIMARY axis; the investor's portfolio names and major secular industry shifts "
+        "also count; an article unrelated to those areas scores low), credibility (respected "
+        "publication/author), intensity (fundraising, M&A, launches, breakthroughs rank high), "
+        "personal (matches the stated interests), time (how recent and time-sensitive — latest, "
+        f"breaking developments rank high). Give an overall relevance 1-10 that PRIORITIZES recent "
+        f"{focus} developments for THIS investor, then a one-line reason. "
+        'Return ONLY a JSON object: {"bullets":[5 strings],"scores":{"relevance":n,'
+        '"credibility":n,"intensity":n,"personal":n,"time":n},"relevance":n,"reason":"..."}.'
     )
     user = f"Title: {title}\n\n{content[:max_chars]}"
     return [{"role": "system", "content": system}, {"role": "user", "content": user}]
@@ -98,6 +110,7 @@ class OpenAICompatibleSummarizer(Summarizer):
             portfolio=portfolio,
             interests=interests,
             max_chars=self._s.SUMMARY_MAX_INPUT_CHARS,
+            focus=self._s.SUMMARY_FOCUS,
         )
         payload = {
             "model": self._s.SUMMARY_MODEL,

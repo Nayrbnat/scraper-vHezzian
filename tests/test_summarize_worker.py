@@ -122,6 +122,27 @@ async def test_idempotent_rerun_does_nothing(db_session, session_factory) -> Non
 
 
 @pytest.mark.db
+async def test_refresh_limit_resummarizes_already_summarized(db_session, session_factory) -> None:
+    """--refresh re-summarizes (overwrites) already-summarized rows, to apply a new prompt."""
+    from scrapeforge.worker.summarize_worker import summarize_pending
+
+    # An article that already has an OLD summary (e.g. from a previous prompt).
+    await _add_article(
+        session_factory, id_="a" * 64, title="Old", summary={"bullets": ["stale"], "model": "old"}
+    )
+    n = await summarize_pending(
+        session_factory=session_factory,
+        summarizer=_FakeSummarizer(),
+        settings=_settings(),
+        refresh_limit=5,
+    )
+    assert n == 1  # the already-summarized row was re-processed (not skipped)
+    row = await db_session.get(ArticleRow, "a" * 64)
+    assert row.summary["bullets"] == ["a", "b", "c", "d", "e"]  # overwritten with the new summary
+    assert row.summary["model"] == "glm-4.5-flash"
+
+
+@pytest.mark.db
 async def test_parse_error_skips_row_without_aborting(db_session, session_factory) -> None:
     from scrapeforge.worker.summarize_worker import summarize_pending
 

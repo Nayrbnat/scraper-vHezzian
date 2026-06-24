@@ -78,8 +78,15 @@ def ingest_cmd(
 
 
 @pipeline_app.command("summarize")
-def summarize_cmd() -> None:
-    """Summarize + score all un-summarized articles once, then exit (run-once drain)."""
+def summarize_cmd(
+    refresh: int = typer.Option(
+        0,
+        "--refresh",
+        help="Re-summarize the N most recent articles (overwrite) to apply a new prompt/focus, "
+        "instead of draining only un-summarized ones.",
+    ),
+) -> None:
+    """Summarize + score articles once, then exit (run-once). Default: drain un-summarized."""
     _use_selector_loop()
     import logging
 
@@ -97,19 +104,28 @@ def summarize_cmd() -> None:
     from scrapeforge.core.db.migrations import ensure_summary_columns
     from scrapeforge.core.db.session import make_engine, make_sessionmaker
     from scrapeforge.core.llm.openai_compatible import OpenAICompatibleSummarizer
-    from scrapeforge.worker.summarize_worker import run_summarize_worker
+    from scrapeforge.worker.summarize_worker import run_summarize_worker, summarize_pending
 
     async def _run() -> None:
         engine = make_engine(Settings().DATABASE_URL)
         try:
             await ensure_summary_columns(engine)  # self-heal columns on an existing DB
-            await run_summarize_worker(
-                session_factory=make_sessionmaker(engine),
-                summarizer=OpenAICompatibleSummarizer(settings),
-                settings=settings,
-            )
+            session_factory = make_sessionmaker(engine)
+            summarizer = OpenAICompatibleSummarizer(settings)
+            if refresh > 0:
+                n = await summarize_pending(
+                    session_factory=session_factory,
+                    summarizer=summarizer,
+                    settings=settings,
+                    refresh_limit=refresh,
+                )
+                typer.echo(f"summarize: refreshed {n} recent article(s).")
+            else:
+                await run_summarize_worker(
+                    session_factory=session_factory, summarizer=summarizer, settings=settings
+                )
+                typer.echo("summarize: done.")
         finally:
             await engine.dispose()
 
     asyncio.run(_run())
-    typer.echo("summarize: done.")
