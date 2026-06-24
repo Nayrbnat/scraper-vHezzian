@@ -77,6 +77,37 @@ def ingest_cmd(
     typer.echo(f"ingest: persisted {n} articles from {len(sources)} publication(s) via {mode}.")
 
 
+@pipeline_app.command("prune")
+def prune_cmd(
+    days: int | None = typer.Option(None, "--days", help="Override retention window (days)."),
+    max_articles: int | None = typer.Option(None, "--max", help="Override the hard article cap."),
+) -> None:
+    """Delete old / irrelevant articles to keep storage under the DB cap (oldest-first)."""
+    _use_selector_loop()
+    from scrapeforge.config.settings import Settings
+    from scrapeforge.core.db.session import make_engine, make_sessionmaker
+    from scrapeforge.pipeline.retention import RetentionSettings, prune_articles
+
+    rs = RetentionSettings()
+
+    async def _run() -> int:
+        engine = make_engine(Settings().DATABASE_URL)
+        try:
+            return await prune_articles(
+                session_factory=make_sessionmaker(engine),
+                retention_days=days if days is not None else rs.RETENTION_DAYS,
+                max_articles=max_articles
+                if max_articles is not None
+                else rs.RETENTION_MAX_ARTICLES,
+                relevance_floor=rs.RETENTION_RELEVANCE_FLOOR,
+            )
+        finally:
+            await engine.dispose()
+
+    n = asyncio.run(_run())
+    typer.echo(f"prune: deleted {n} article(s).")
+
+
 @pipeline_app.command("summarize")
 def summarize_cmd(
     refresh: int = typer.Option(
