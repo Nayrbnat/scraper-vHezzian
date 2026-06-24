@@ -36,6 +36,9 @@ def get_articles(source: str) -> list[Article]:
 
     - ``sample``            → the bundled sample corpus (standalone prototype).
     - ``jsonl:<path>``      → read a JsonlSink ``.jsonl`` produced by a real scrape.
+    - ``postgres``          → recent summarized articles from the DB, relevance-ranked
+                             (window/limit from ``DigestSettings``); built into the
+                             relevance digest by :func:`make_digest`.
     """
     if source == "sample":
         return sample_articles()
