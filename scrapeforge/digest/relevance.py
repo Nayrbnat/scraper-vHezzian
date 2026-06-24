@@ -22,7 +22,8 @@ def _relevance(article: Article) -> int:
 
 
 def _item(article: Article) -> DigestItem:
-    summary = article.metadata.get("summary") or {}
+    summary = article.metadata.get("summary")
+    summary = summary if isinstance(summary, dict) else {}
     raw_bullets = summary.get("bullets") or []
     bullets = [b.strip() for b in raw_bullets if isinstance(b, str) and b.strip()]
     reason = summary.get("reason")

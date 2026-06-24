@@ -70,3 +70,46 @@ def test_lead_text_fallback_summary_is_set() -> None:
     item = digest.sections[0].items[0]
     assert item.summary  # non-empty lead-text fallback (used if a client ignores bullets)
     assert item.source == "e.com"
+
+
+def test_recency_tiebreak_newer_article_first() -> None:
+    from scrapeforge.digest.relevance import build_relevance_digest
+
+    arts = [
+        _article("https://e.com/old", "Older", relevance=7, days_ago=5),
+        _article("https://e.com/new", "Newer", relevance=7, days_ago=0),
+    ]
+    digest = build_relevance_digest(_sub(), arts, min_relevance=5, limit=10)
+    titles = [i.title for i in digest.sections[0].items]
+    assert titles == ["Newer", "Older"]  # same relevance; recency tiebreak puts newer first
+
+
+def test_degenerate_metadata_no_summary_key() -> None:
+    from scrapeforge.digest.relevance import build_relevance_digest
+
+    # summary is a non-dict (malformed JSONB stored as a bare string) — must not raise
+    art_bad_summary = Article(
+        url="https://e.com/bad",
+        title="Bad summary",
+        content="Body text long enough to produce a non-empty lead-text fallback summary.",
+        metadata={
+            "source_domain": "e.com",
+            "bucket": "community",
+            "relevance": 7,
+            "summary": "this-is-a-string-not-a-dict",
+        },
+    )
+    # summary key absent entirely
+    art_no_summary = Article(
+        url="https://e.com/1",
+        title="No summary",
+        content="Body text long enough to produce a non-empty lead-text fallback summary.",
+        metadata={"source_domain": "e.com", "bucket": "community", "relevance": 7},
+    )
+    for art in (art_bad_summary, art_no_summary):
+        digest = build_relevance_digest(_sub(), [art], min_relevance=5, limit=10)
+        item = digest.sections[0].items[0]
+        assert item.bullets == []
+        assert item.reason is None
+        assert item.relevance == 7
+        assert item.summary  # lead-text fallback is non-empty
