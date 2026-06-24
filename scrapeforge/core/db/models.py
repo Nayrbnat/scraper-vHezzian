@@ -23,7 +23,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import DateTime, Text
+from sqlalchemy import ARRAY, DateTime, Double, ForeignKey, Index, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -160,3 +160,58 @@ class Source(Base):
 
     enabled: Mapped[bool] = mapped_column(default=True)
     """Whether the scheduler should enqueue this source automatically."""
+
+
+class UserProfile(Base):
+    """App-owned profile (the Hezzian app writes this; the pipeline only reads it).
+
+    ``create_all`` uses ``checkfirst=True`` so this definition coexists with the app's own
+    migration — whichever runs first creates the table; the other is a no-op.
+    """
+
+    __tablename__ = "user_profiles"
+
+    user_id: Mapped[str] = mapped_column(primary_key=True)
+    """Matches the Hezzian app's user id."""
+
+    portfolio: Mapped[list[str]] = mapped_column(ARRAY(Text), default=list)
+    """Tickers / company names the user holds or tracks."""
+
+    sectors: Mapped[list[str]] = mapped_column(ARRAY(Text), default=list)
+    """Sectors of interest, e.g. ``{AI, semiconductors, fintech}``."""
+
+    focus: Mapped[str | None]
+    """Optional free-text emphasis (defaults to the global SUMMARY_FOCUS when unset)."""
+
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    """Timezone-aware UTC timestamp of the last profile write."""
+
+
+class UserProfileVector(Base):
+    """Pipeline-owned embedding of a user's profile; re-embedded only when the profile changes."""
+
+    __tablename__ = "user_profile_vectors"
+
+    user_id: Mapped[str] = mapped_column(primary_key=True)
+    embedding: Mapped[list[float]] = mapped_column(Vector(1536))
+    source_hash: Mapped[str]
+    """sha256 of (portfolio + sectors + focus); embed_profiles skips unchanged users."""
+
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class UserArticleRelevance(Base):
+    """Pipeline-owned per-(user, article) similarity score; the app reads this for each feed."""
+
+    __tablename__ = "user_article_relevance"
+
+    user_id: Mapped[str] = mapped_column(primary_key=True)
+    article_id: Mapped[str] = mapped_column(
+        ForeignKey("articles.id", ondelete="CASCADE"), primary_key=True
+    )
+    score: Mapped[float] = mapped_column(Double)
+    """Cosine similarity in [-1, 1]; higher = better fit."""
+
+    computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    __table_args__ = (Index("ix_uar_user_score", "user_id", "score"),)

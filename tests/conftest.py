@@ -179,6 +179,9 @@ async def db_session(_db_url: str) -> AsyncGenerator[AsyncSession, None]:
         # Teardown: truncate all application tables so the next test starts clean.
         async with engine.begin() as conn:
             await conn.execute(
-                sqlalchemy.text("TRUNCATE TABLE articles, jobs, sources RESTART IDENTITY CASCADE")
+                sqlalchemy.text(
+                    "TRUNCATE TABLE articles, jobs, sources, user_profiles, "
+                    "user_profile_vectors, user_article_relevance RESTART IDENTITY CASCADE"
+                )
             )
         await engine.dispose()
