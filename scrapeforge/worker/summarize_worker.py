@@ -27,21 +27,21 @@ async def summarize_pending(
     session_factory: async_sessionmaker[AsyncSession],
     summarizer: Summarizer,
     settings,
+    refresh_limit: int | None = None,
 ) -> int:
-    """Summarize one batch of un-summarized articles. Returns the count persisted."""
+    """Summarize one batch and return the count persisted.
+
+    Default: newest ``SUMMARY_BATCH_SIZE`` articles WHERE ``summary IS NULL`` (idempotent drain).
+    When *refresh_limit* is set: the newest *refresh_limit* articles regardless of summary state —
+    re-summarizing (overwriting) them, used to apply a new prompt/focus to existing rows.
+    """
     async with session_factory() as session:
-        rows = (
-            (
-                await session.execute(
-                    select(Article)
-                    .where(Article.summary.is_(None))
-                    .order_by(Article.fetched_at.desc(), Article.id.desc())
-                    .limit(settings.SUMMARY_BATCH_SIZE)
-                )
-            )
-            .scalars()
-            .all()
-        )
+        stmt = select(Article).order_by(Article.fetched_at.desc(), Article.id.desc())
+        if refresh_limit is not None:
+            stmt = stmt.limit(refresh_limit)
+        else:
+            stmt = stmt.where(Article.summary.is_(None)).limit(settings.SUMMARY_BATCH_SIZE)
+        rows = (await session.execute(stmt)).scalars().all()
         pending = [(r.id, r.title, r.content, r.publish_date) for r in rows]
 
     count = 0

@@ -40,6 +40,26 @@ def _good_json() -> str:
     )
 
 
+def test_prompt_focuses_and_demands_distinct_bullets() -> None:
+    from scrapeforge.core.llm.openai_compatible import _build_messages
+
+    msgs = _build_messages(
+        title="t",
+        content="c",
+        published=None,
+        portfolio=["Nvidia"],
+        interests=["hybrid bonding"],
+        max_chars=1000,
+        focus="artificial intelligence and finance",
+    )
+    system = msgs[0]["content"]
+    assert "artificial intelligence and finance" in system
+    assert "distinct" in system.lower()  # bullets must be distinct, non-overlapping
+    # the five explicit, ordered bullet roles
+    for marker in ("1.", "2.", "3.", "4.", "5."):
+        assert marker in system
+
+
 @respx.mock
 async def test_parses_full_object(fake_env) -> None:
     from scrapeforge.core.llm.openai_compatible import OpenAICompatibleSummarizer

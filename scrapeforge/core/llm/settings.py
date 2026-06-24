@@ -20,6 +20,8 @@ class SummarizerSettings(BaseSettings):
     SUMMARY_MODEL: str = Field(default="glm-4.5-flash")
     SUMMARY_PORTFOLIO: str = Field(default="")  # CSV → criterion #1
     SUMMARY_INTERESTS: str = Field(default="")  # CSV → criterion #4
+    # The topical focus the relevance score prioritizes (and the briefing is framed around).
+    SUMMARY_FOCUS: str = Field(default="artificial intelligence and finance")
     SUMMARY_BATCH_SIZE: int = Field(default=20)
     SUMMARY_MAX_INPUT_CHARS: int = Field(default=12000)
     SUMMARY_REQUEST_TIMEOUT: float = Field(default=90.0)  # GLM-4.5 reasoning calls run 12-30s+

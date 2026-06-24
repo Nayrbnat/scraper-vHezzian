@@ -20,7 +20,11 @@ name: Daily pipeline (ingest + summarize)
 on:
   schedule:
     - cron: "0 5 * * *" # 05:00 UTC daily — well before the 09:00 London digest send
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      summarize_refresh:
+        description: "Re-summarize the N most recent articles with the current prompt (0 = normal drain)"
+        default: "0"
 
 permissions:
   contents: read
@@ -67,4 +71,13 @@ jobs:
         run: python -m scrapeforge pipeline ingest --limit 5
 
       - name: Summarize + score the new articles
-        run: python -m scrapeforge pipeline summarize
+        # Normal scheduled run drains un-summarized rows. A manual dispatch with
+        # summarize_refresh=N re-summarizes the N most recent rows (applies a new prompt/focus).
+        env:
+          REFRESH: ${{ github.event.inputs.summarize_refresh || '0' }}
+        run: |
+          if [ "${REFRESH:-0}" -gt 0 ] 2>/dev/null; then
+            python -m scrapeforge pipeline summarize --refresh "$REFRESH"
+          else
+            python -m scrapeforge pipeline summarize
+          fi
