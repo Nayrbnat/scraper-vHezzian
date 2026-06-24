@@ -1921,6 +1921,24 @@ class RedditSettings(BaseSettings):
     always-on docker-compose stack: `init-db` (deploy hook), `ingest` (hourly/daily), and
     `summarize` (daily). See §3.26.
 
+    **Multi-user relevance carve-out (Phase 3).** `pipeline/embeddings_jobs.py`
+    (`embed_articles`, `embed_profiles`, `score_users`, `seed_owner`) is the same class of
+    post-ingest enrichment as the summarizer: an independent batch read-modify-write over
+    Postgres, not part of the scraper→transform pipeline. It fills `articles.embedding`
+    (WHERE NULL), embeds changed profiles, and writes per-user cosine scores. See Invariant #19
+    and §3.27.
+
+19. **Multi-user relevance is embeddings + pgvector, never per-user LLM (Phase 3).** Per-user
+    ranking is computed by cosine similarity (`Article.embedding.cosine_distance(...)`) over the
+    SHARED corpus — one embedding per article, one per changed profile, then in-database vector
+    math — never a per-user LLM call. The Hezzian app is the **sole writer** of `user_profiles`;
+    the pipeline only reads it and is the **sole writer** of `user_profile_vectors` and
+    `user_article_relevance` (FK→`articles.id` ON DELETE CASCADE, so `prune` cleans scores).
+    `EMBED_DIM` MUST equal the `Vector(N)` column width (1536). Embedding jobs idle when
+    `EMBED_API_KEY` is empty, so the workflow stays green pre-rollout. The Embedder provider is
+    swapped by addition behind the `core/embeddings/` port (`EMBED_PROVIDER`: `gemini` default,
+    `openai_compatible` fallback) — no core edits.
+
 ---
 
 ## 3.26 Pipeline Sub-App (`scrapeforge/pipeline/`)
@@ -1935,6 +1953,8 @@ backed by Neon Postgres — no Redis, no MinIO, no persistent worker process.
 |------|------|
 | `pipeline/__init__.py` | Package marker |
 | `pipeline/jobs.py` | Pure-async job functions (`init_db`, `ingest_publications`); injected with fakes in tests |
+| `pipeline/retention.py` | Storage retention (`prune_articles`); oldest-first deletion under the DB size cap |
+| `pipeline/embeddings_jobs.py` | Phase-3 multi-user jobs (`embed_articles`, `embed_profiles`, `score_users`, `seed_owner`); pure-async, injected `Embedder` (§3.27) |
 | `pipeline/cli.py` | Typer sub-app `pipeline_app` mounted in root `cli.py`; the only file that calls `asyncio.run()` (sanctioned CLI entry-point, Invariant #12) |
 
 ### Commands (`scrapeforge pipeline <cmd>`)
@@ -1944,6 +1964,11 @@ backed by Neon Postgres — no Redis, no MinIO, no persistent worker process.
 | `init-db` | `CREATE EXTENSION IF NOT EXISTS vector` + `Base.metadata.create_all` + `ensure_summary_columns` — idempotent, re-runable | One-off "Deploy Job" |
 | `ingest [--limit N] [--sector S] [--max M]` | Scrape curated Substacks → UPSERT into Postgres via `PostgresSink` (no queue, no object store) | Hourly/daily Cron Job |
 | `summarize` | Drain `articles WHERE summary IS NULL` → LLM → UPDATE; exits when done | Daily Cron Job (after ingest) |
+| `prune` | Delete old / low-relevance articles oldest-first to stay under the DB cap | Daily Cron Job |
+| `seed-owner` | Upsert `user_id='owner'` profile from `SUMMARY_PORTFOLIO`/`INTERESTS`/`FOCUS` | Daily (before embed) |
+| `embed-articles` | Fill `articles.embedding` WHERE NULL via the `Embedder` port; idle if no `EMBED_API_KEY` | Daily (after summarize) |
+| `embed-profiles` | Embed changed `user_profiles` (source-hash gate) → `user_profile_vectors` | Daily (after embed-articles) |
+| `score-users` | pgvector cosine top-K per user → `user_article_relevance`; no LLM, no API key | Daily (after embed-profiles) |
 
 ### How it differs from the event-driven worker stack
 
@@ -1957,6 +1982,26 @@ backed by Neon Postgres — no Redis, no MinIO, no persistent worker process.
 
 The run-once jobs call the same `PostgresSink`, `SubstackScraper`, and `OpenAICompatibleSummarizer`
 that the full pipeline uses — only the transport layer (queue vs. direct call) differs.
+
+## 3.27 Embedder Port (`scrapeforge/core/embeddings/`)
+
+The Phase-3 multi-user relevance plane (Invariant #19). Mirrors the `core/llm/` Summarizer port:
+a provider-agnostic boundary the embedding jobs depend on, swapped by addition — no core edits.
+
+| File | Role |
+|------|------|
+| `core/embeddings/base.py` | `Embedder` ABC — `async def embed(texts: list[str]) -> list[list[float]]` |
+| `core/embeddings/exceptions.py` | `EmbeddingError` / `EmbeddingRateLimitError` / `EmbeddingParseError` (under `ScrapeForgeError`) |
+| `core/embeddings/settings.py` | `EmbedderSettings` fragment (`EMBED_*`); `EMBED_DIM` defaults 1536 (= the `Vector(1536)` columns) |
+| `core/embeddings/gemini.py` | `GeminiEmbedder` (PRIMARY) — Gemini `:batchEmbedContents` over httpx; key in `x-goog-api-key` header |
+| `core/embeddings/openai_compatible.py` | `OpenAICompatibleEmbedder` (fallback, e.g. Jina) — POSTs `{BASE}/embeddings` |
+| `core/embeddings/factory.py` | `make_embedder(settings)` — picks the adapter by `EMBED_PROVIDER` |
+
+**Data contract (shared Postgres).** App-owned `user_profiles(user_id, portfolio[], sectors[],
+focus, updated_at)`; pipeline-owned `user_profile_vectors(user_id, embedding, source_hash,
+updated_at)` and `user_article_relevance(user_id, article_id→articles.id CASCADE, score,
+computed_at)`. `articles.embedding Vector(1536)` is filled by `embed-articles`. The app reads
+`user_article_relevance` (indexed `(user_id, score)`) to build each user's feed.
 
 ### `DATABASE_SSL` — opt-in TLS for Neon
 

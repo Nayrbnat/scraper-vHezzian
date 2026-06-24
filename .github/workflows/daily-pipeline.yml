@@ -39,6 +39,10 @@ jobs:
       SUMMARY_API_KEY: ${{ secrets.SUMMARY_API_KEY }}
       SUMMARY_PORTFOLIO: ${{ secrets.SUMMARY_PORTFOLIO }}
       SUMMARY_INTERESTS: ${{ secrets.SUMMARY_INTERESTS }}
+      # --- embeddings (Phase 3 multi-user relevance) ---
+      EMBED_API_KEY: ${{ secrets.EMBED_API_KEY }}
+      EMBED_PROVIDER: ${{ vars.EMBED_PROVIDER || 'gemini' }}
+      EMBED_MODEL: ${{ vars.EMBED_MODEL || 'gemini-embedding-001' }}
       # --- non-secrets ---
       DATABASE_SSL: require # asyncpg uses TLS to reach Neon
       SUMMARY_MODEL: ${{ vars.SUMMARY_MODEL || 'glm-4.5-flash' }}
@@ -81,6 +85,21 @@ jobs:
           else
             python -m scrapeforge pipeline summarize
           fi
+
+      - name: Seed the owner profile (single-user today)
+        # Upserts user_id='owner' from SUMMARY_PORTFOLIO/INTERESTS/FOCUS so the per-user path
+        # runs for the owner. No API key needed.
+        run: python -m scrapeforge pipeline seed-owner
+
+      - name: Embed new articles (fills articles.embedding WHERE NULL)
+        # Idle-skips when EMBED_API_KEY is unset, so the pipeline stays green pre-rollout.
+        run: python -m scrapeforge pipeline embed-articles
+
+      - name: Embed changed user profiles
+        run: python -m scrapeforge pipeline embed-profiles
+
+      - name: Score articles per user (pgvector cosine; no API cost)
+        run: python -m scrapeforge pipeline score-users
 
       - name: Prune old / irrelevant articles (storage cap)
         # Keeps the Neon free-tier DB under its size limit: deletes oldest-beyond-window
