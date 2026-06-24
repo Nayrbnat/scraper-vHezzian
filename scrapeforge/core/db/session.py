@@ -30,6 +30,7 @@ Usage
 
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 
 from sqlalchemy.ext.asyncio import (
@@ -38,6 +39,17 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
+
+
+def _ssl_connect_args() -> dict:
+    """Return asyncpg SSL connect-args when DATABASE_SSL opts in (Neon); empty otherwise.
+
+    Local/CI Postgres has no TLS, so SSL stays OFF unless DATABASE_SSL is set to a truthy value
+    (``require``/``true``/``1``). Set ``DATABASE_SSL=require`` on Render for Neon.
+    """
+    if os.environ.get("DATABASE_SSL", "").strip().lower() in {"require", "true", "1"}:
+        return {"ssl": True}
+    return {}
 
 
 def make_engine(database_url: str | None = None) -> AsyncEngine:
@@ -63,6 +75,7 @@ def make_engine(database_url: str | None = None) -> AsyncEngine:
         echo=False,
         pool_pre_ping=True,
         pool_recycle=3600,
+        connect_args=_ssl_connect_args(),
     )
 
 
