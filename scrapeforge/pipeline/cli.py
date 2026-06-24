@@ -68,3 +68,41 @@ def ingest_cmd(
 
     n = asyncio.run(_run())
     typer.echo(f"ingest: persisted {n} articles from {len(sources)} publication(s).")
+
+
+@pipeline_app.command("summarize")
+def summarize_cmd() -> None:
+    """Summarize + score all un-summarized articles once, then exit (run-once drain)."""
+    _use_selector_loop()
+    import logging
+
+    from scrapeforge.core.llm.settings import SummarizerSettings
+
+    settings = SummarizerSettings()
+    if not settings.SUMMARY_API_KEY:
+        logging.getLogger(__name__).warning(
+            "SUMMARY_API_KEY empty — summarize skipped (set it to enable)."
+        )
+        typer.echo("summarize: skipped (no SUMMARY_API_KEY).")
+        return
+
+    from scrapeforge.config.settings import Settings
+    from scrapeforge.core.db.migrations import ensure_summary_columns
+    from scrapeforge.core.db.session import make_engine, make_sessionmaker
+    from scrapeforge.core.llm.openai_compatible import OpenAICompatibleSummarizer
+    from scrapeforge.worker.summarize_worker import run_summarize_worker
+
+    async def _run() -> None:
+        engine = make_engine(Settings().DATABASE_URL)
+        try:
+            await ensure_summary_columns(engine)  # self-heal columns on an existing DB
+            await run_summarize_worker(
+                session_factory=make_sessionmaker(engine),
+                summarizer=OpenAICompatibleSummarizer(settings),
+                settings=settings,
+            )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_run())
+    typer.echo("summarize: done.")
