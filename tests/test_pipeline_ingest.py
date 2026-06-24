@@ -48,6 +48,49 @@ class _FakeScraper:
         return out
 
 
+class _FlakyScraper:
+    """Raises on one target (simulating an HTTP 429), succeeds on the rest."""
+
+    def __init__(self, boom: str) -> None:
+        self._boom = boom
+
+    async def scrape_publication(self, target, limit=50, sort="new"):  # noqa: ARG002
+        from scrapeforge.exceptions import RateLimitError
+
+        if target == self._boom:
+            raise RateLimitError(f"HTTP 429 — rate limited by {target}")
+        return [
+            ScrapeResult(
+                status="success",
+                driver_used="curl_cffi",
+                article=Article(
+                    url=f"https://{target}/p/1",
+                    title="ok",
+                    content="Body.",
+                    metadata={"bucket": "community", "source_domain": target},
+                ),
+            )
+        ]
+
+
+@pytest.mark.db
+async def test_ingest_publications_skips_failing_publication(db_session, session_factory) -> None:
+    """One publication raising (e.g. HTTP 429) must NOT abort the whole batch."""
+    from scrapeforge.pipeline.jobs import ingest_publications
+
+    sources = [_FakeSub("boom.com"), _FakeSub("ok.com")]
+    n = await ingest_publications(
+        session_factory=session_factory,
+        scraper=_FlakyScraper(boom="boom.com"),
+        sources=sources,
+        limit=5,
+    )
+    assert n == 1  # boom.com 429'd and was skipped; ok.com still persisted
+
+    total = await db_session.scalar(select(func.count()).select_from(ArticleRow))
+    assert total == 1
+
+
 @pytest.mark.db
 async def test_ingest_publications_upserts(db_session, session_factory) -> None:
     from scrapeforge.pipeline.jobs import ingest_publications

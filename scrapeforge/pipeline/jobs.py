@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from scrapeforge.core.db.migrations import ensure_summary_columns
 from scrapeforge.core.db.models import Base
 from scrapeforge.core.storage.postgres import PostgresSink
+from scrapeforge.exceptions import ScrapeForgeError
 
 log = logging.getLogger(__name__)
 
@@ -38,8 +39,16 @@ async def ingest_publications(*, session_factory, scraper, sources, limit: int) 
     """
     sink = PostgresSink(session_factory)
     persisted = 0
+    failed = 0
     for source in sources:
-        results = await scraper.scrape_publication(source.base, limit=limit)
+        # One publication's failure (HTTP 429, Cloudflare challenge, driver error) must not
+        # abort the whole run — log it and move on so the other publications still ingest.
+        try:
+            results = await scraper.scrape_publication(source.base, limit=limit)
+        except ScrapeForgeError as exc:
+            failed += 1
+            log.warning("ingest: skipping %s — scrape failed: %s", source.base, exc)
+            continue
         for result in results:
             if result.status != "success" or result.article is None:
                 continue
@@ -47,5 +56,10 @@ async def ingest_publications(*, session_factory, scraper, sources, limit: int) 
                 continue
             await sink.write(result)
             persisted += 1
-    log.info("ingest: persisted %d articles across %d publications", persisted, len(sources))
+    log.info(
+        "ingest: persisted %d articles across %d publications (%d failed)",
+        persisted,
+        len(sources),
+        failed,
+    )
     return persisted
