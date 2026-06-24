@@ -1,0 +1,68 @@
+name: Daily pipeline (ingest + summarize)
+
+# Free, card-free deployment of the Substack pipeline: GitHub Actions (free scheduled compute)
+# scrapes the 50 curated investing Substacks into a managed Neon Postgres and AI-summarizes +
+# scores the new articles. The relevance-ranked EMAIL is sent separately by daily-digest.yml
+# (09:00 Europe/London) reading the SAME Neon DB. No Render, no credit card, no always-on server.
+#
+# Runs at 05:00 UTC — hours before the digest send, so ingest + summarize always finish first.
+# (GitHub schedules can drift by 10-30 min at peak; the long buffer absorbs that.)
+#
+# Requires repo secrets (Settings > Secrets and variables > Actions > Secrets):
+#   DATABASE_URL        Neon POOLED connection string as postgresql+asyncpg://user:pass@host/db
+#   SUMMARY_API_KEY     z.ai GLM key (the free GLM-4.5-Flash model)
+#   SUMMARY_PORTFOLIO   (optional) your holdings, CSV — scored against
+#   SUMMARY_INTERESTS   (optional) your interests, CSV — scored against
+# Non-secrets are set inline below. DATABASE_SSL=require makes asyncpg use TLS to Neon.
+# STATE_STORE_KEY is a throwaway placeholder: Settings requires it (>=32 chars) but the
+# Substack scrape/summarize path never uses it.
+
+on:
+  schedule:
+    - cron: "0 5 * * *" # 05:00 UTC daily — well before the 09:00 London digest send
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  ingest-and-summarize:
+    name: scrape -> summarize -> score (into Neon)
+    runs-on: ubuntu-latest
+    env:
+      # --- secrets (set in the GitHub dashboard, never here) ---
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      SUMMARY_API_KEY: ${{ secrets.SUMMARY_API_KEY }}
+      SUMMARY_PORTFOLIO: ${{ secrets.SUMMARY_PORTFOLIO }}
+      SUMMARY_INTERESTS: ${{ secrets.SUMMARY_INTERESTS }}
+      # --- non-secrets ---
+      DATABASE_SSL: require # asyncpg uses TLS to reach Neon
+      SUMMARY_MODEL: ${{ vars.SUMMARY_MODEL || 'glm-4.5-flash' }}
+      SUMMARY_API_BASE_URL: ${{ vars.SUMMARY_API_BASE_URL || 'https://api.z.ai/api/paas/v4' }}
+      # Required by Settings (>=32 chars) but unused on this path — a fixed placeholder, not a secret.
+      STATE_STORE_KEY: pipeline-placeholder-not-used-0000000000
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
+
+      - name: Create venv
+        run: |
+          uv venv --python 3.12
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Install project (runtime only)
+        run: uv pip install -e .
+
+      - name: Prepare database (idempotent)
+        run: python -m scrapeforge pipeline init-db
+
+      - name: Ingest curated Substacks into Neon
+        run: python -m scrapeforge pipeline ingest
+
+      - name: Summarize + score the new articles
+        run: python -m scrapeforge pipeline summarize

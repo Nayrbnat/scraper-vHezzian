@@ -83,4 +83,6 @@ jobs:
           # "postgres" and add a DATABASE_URL secret to send the real relevance-ranked digest.
           DIGEST_SOURCE: ${{ vars.DIGEST_SOURCE || 'sample' }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          # asyncpg uses TLS to reach Neon (ignored on the 'sample' source — no DB connection).
+          DATABASE_SSL: require
         run: python -m scrapeforge digest send --yes --source "$DIGEST_SOURCE"
