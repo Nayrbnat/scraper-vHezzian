@@ -73,10 +73,13 @@ owns it — `CREATE TABLE IF NOT EXISTS` is a no-op when the app already made it
 
 ### 4.1 `core/embeddings/` — the Embedder port (mirrors the Summarizer port)
 - `base.py`: `Embedder` ABC — `async def embed(self, texts: list[str]) -> list[list[float]]`.
-- `openai_compatible.py`: `OpenAICompatibleEmbedder` — POSTs to `{BASE}/embeddings`, returns vectors.
-  Batches inputs; never logs the key; 429/timeout handling mirrors the summarizer adapter.
-- `settings.py`: `EmbedderSettings` fragment — `EMBED_API_BASE_URL`, `EMBED_API_KEY`, `EMBED_MODEL`,
-  `EMBED_DIM` (default 1536), `EMBED_BATCH_SIZE`. **`EMBED_DIM` must match the `vector(N)` columns.**
+- `gemini.py`: `GeminiEmbedder` (PRIMARY) — calls Gemini `gemini-embedding-001` with
+  `output_dimensionality=EMBED_DIM` (1536); batches; never logs the key; 429/timeout handling mirrors
+  the summarizer adapter.
+- `openai_compatible.py`: `OpenAICompatibleEmbedder` (fallback, e.g. Jina) — POSTs to `{BASE}/embeddings`.
+- `settings.py`: `EmbedderSettings` fragment — `EMBED_PROVIDER` (`gemini` | `openai_compatible`),
+  `EMBED_API_KEY`, `EMBED_API_BASE_URL`, `EMBED_MODEL`, `EMBED_DIM` (default 1536), `EMBED_BATCH_SIZE`.
+  A small factory picks the adapter by `EMBED_PROVIDER`. **`EMBED_DIM` must match the `vector(N)` columns.**
 
 ### 4.2 `pipeline/embeddings_jobs.py` — the three jobs (pure-async, injected adapters)
 - `embed_articles(*, session_factory, embedder, batch_size) -> int`: select `WHERE embedding IS NULL`
@@ -109,16 +112,21 @@ v1 = **pure cosine similarity** between the user-profile vector and each article
 relevance score (1–10) is available as an optional light prior later
 (`final = w·similarity + (1−w)·norm(relevance)`) — left as a tunable knob, not built in v1.
 
-## 7. Open implementation decision (needs your input)
-**Which embeddings provider/model?** Embeddings aren't free the way GLM-4.5-Flash is. Options:
-- **OpenAI `text-embedding-3-small`** — 1536-dim (matches the column), very cheap (~$0.02 / 1M tokens),
-  rock-solid. *Recommended* unless you want strictly $0.
-- **A free/open model** (e.g. BGE/GTE via `sentence-transformers`) — $0 and runs on the GitHub runner,
-  but adds a heavy `torch` dependency and is slower; dimension differs (would set `EMBED_DIM` +
-  migrate the `vector` columns).
-- **A free embeddings API** (e.g. a Zhipu/Jina/Cohere free tier) — $0 but dimension/limits vary.
+## 7. Embeddings provider — DECIDED: free API (Gemini, Jina fallback)
+Owner chose a **free embeddings API** ($0). Research (2026) + a probe (z.ai's GLM gateway exposes no
+embedding models — error 1211) settled it on:
 
-This is the one choice that blocks implementation; everything else above is settled.
+- **Primary: Google Gemini `gemini-embedding-001`** via a free Google AI Studio key (no credit card).
+  Recurring free quota (~1,500 requests/day, 10M tokens/min) suits a daily pipeline, and its
+  **output dimension is configurable to 1536 — an exact match for the existing `vector(1536)` columns,
+  so NO migration is needed.** It is not OpenAI-wire-compatible, so the Embedder port gets a small
+  `GeminiEmbedder` adapter (the port exists precisely to absorb this).
+- **Fallback: Jina embeddings v4** — OpenAI-wire-compatible (drops into the OpenAI-compatible adapter),
+  but its free grant is tighter for ongoing daily use; set `EMBED_DIM` and migrate the columns if used.
+
+`EmbedderSettings` therefore carries `EMBED_PROVIDER` (`gemini` | `openai_compatible`), the key, model,
+and `EMBED_DIM` (default 1536). New secret to add at deploy: `EMBED_API_KEY` (a free Google AI Studio
+key). Everything else is settled.
 
 ## 8. Testing — Definition of Done (hermetic)
 1. `ruff` clean; `pytest -m "not integration"` green incl. new `@db` tests; coverage ≥ 80%.
