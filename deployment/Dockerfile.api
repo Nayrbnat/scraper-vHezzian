@@ -12,6 +12,7 @@ WORKDIR /app
 # which are not invoked here.
 COPY pyproject.toml README.md ./
 COPY scrapeforge ./scrapeforge
+COPY data ./data
 RUN pip install --upgrade pip && pip install .
 
 # Drop privileges.

@@ -71,7 +71,9 @@ Render cron jobs do **not** auto-run on deploy. Trigger them manually in order:
    each article that has `summary IS NULL`. Confirm rows are updated in Neon.
 
 4. **Trigger `digest`** → sends the relevance-ranked email. Verify that a real email arrives in the
-   `DIGEST_TO` inbox with article summaries ordered by relevance score.
+   `DIGEST_TO` inbox with article summaries ordered by relevance score. The digest sends to the
+   single bundled subscriber (`data/subscribers/dee.json`, shipped in the image); multi-subscriber
+   support is a later phase.
 
 If any step fails, check the Render log stream for the cron service. Common causes:
 - `DATABASE_URL` is wrong scheme or missing `postgresql+asyncpg://` prefix.

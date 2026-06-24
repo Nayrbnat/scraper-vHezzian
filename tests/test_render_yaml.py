@@ -10,8 +10,13 @@ _SECRET_NAMES = {
     "DATABASE_URL",
     "STATE_STORE_KEY",
     "SUMMARY_API_KEY",
-    "DIGEST_SMTP_PASSWORD",
+    "SUMMARY_PORTFOLIO",
+    "SUMMARY_INTERESTS",
+    "DIGEST_SMTP_HOST",
+    "DIGEST_SMTP_PORT",
     "DIGEST_SMTP_USER",
+    "DIGEST_SMTP_PASSWORD",
+    "DIGEST_FROM",
     "DIGEST_TO",
 }
 
@@ -20,8 +25,8 @@ def test_render_yaml_valid_and_secretless() -> None:
     doc = yaml.safe_load(Path("render.yaml").read_text(encoding="utf-8"))
     services = doc["services"]
     names = {s["name"] for s in services}
-    # the three scheduled jobs + init-db are present
-    assert {"ingest", "summarize", "digest"} <= names
+    # all four services are present (three scheduled + manual init-db)
+    assert {"ingest", "summarize", "digest", "init-db"} <= names
     for svc in services:
         assert svc["type"] == "cron"
         for ev in svc.get("envVars", []):
