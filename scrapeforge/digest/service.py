@@ -47,12 +47,33 @@ def get_articles(source: str) -> list[Article]:
             if line.strip()
         ]
         return [_article_from_jsonl(r) for r in rows]
-    raise ValueError(f"unknown article source {source!r} (use 'sample' or 'jsonl:<path>')")
+    if source == "postgres":
+        from scrapeforge.config.settings import Settings
+        from scrapeforge.digest.postgres_source import load_ranked_articles_sync
+        from scrapeforge.digest.settings import DigestSettings
+
+        ds = DigestSettings()
+        return load_ranked_articles_sync(
+            Settings().DATABASE_URL, window_hours=ds.DIGEST_WINDOW_HOURS, limit=ds.DIGEST_TOP_N
+        )
+    raise ValueError(
+        f"unknown article source {source!r} (use 'sample', 'jsonl:<path>', or 'postgres')"
+    )
 
 
 def make_digest(subscriber: Subscriber, source: str = "sample") -> tuple[Digest, RenderedEmail]:
     """Build + render a digest for *subscriber* from *source*. (No send.)"""
-    digest = build_digest(subscriber, get_articles(source))
+    articles = get_articles(source)
+    if source == "postgres":
+        from scrapeforge.digest.relevance import build_relevance_digest
+        from scrapeforge.digest.settings import DigestSettings
+
+        ds = DigestSettings()
+        digest = build_relevance_digest(
+            subscriber, articles, min_relevance=ds.DIGEST_RELEVANCE_FLOOR, limit=ds.DIGEST_TOP_N
+        )
+    else:
+        digest = build_digest(subscriber, articles)
     return digest, render_email(digest)
 
 
