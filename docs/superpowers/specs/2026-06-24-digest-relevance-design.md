@@ -20,7 +20,7 @@ score**, pulling real scored articles from Postgres. Each item shows its **5 bul
 | Inclusion | **Top N above a floor**: top `DIGEST_TOP_N=10`, only items `relevance >= DIGEST_RELEVANCE_FLOOR=5` (both configurable) |
 | Window | **Last `DIGEST_WINDOW_HOURS=48`h** (configurable) |
 | Item render | 5 bullets + relevance badge (`9/10`) + `why: <reason>` |
-| Source | New `--source postgres`; daily workflow switches to it |
+| Source | New `--source postgres` capability; the daily workflow source becomes a repo **variable defaulting to `sample`** (flip to `postgres` at deploy time — CI has no Postgres) |
 | Empty day | Send a short **"no high-relevance updates today"** email (do not skip the send) |
 
 ## 3. Flow
@@ -108,8 +108,13 @@ digest preview/send --source postgres
   source is `postgres`, build via `build_relevance_digest(... min_relevance=floor, limit=top_n)`;
   otherwise the existing `build_digest` (keyword). `deliver(...)` unchanged otherwise.
 - `cli.py`: `--source` already exists; document `postgres`. Optional CLI overrides
-  `--floor`/`--top`/`--window` (default from `DigestSettings`). The **daily workflow**
-  (`.github/workflows/…digest…`) switches its `--source` to `postgres`.
+  `--floor`/`--top`/`--window` (default from `DigestSettings`).
+- **Daily workflow** (`.github/workflows/daily-digest.yml`): its `run:` source becomes
+  `--source ${DIGEST_SOURCE:-sample}` driven by a repo **variable** (`vars.DIGEST_SOURCE`),
+  defaulting to `sample` so CI stays green (Actions has no Postgres). Flipping to `postgres` is a
+  deploy-time step: set the `DIGEST_SOURCE=postgres` repo variable + a `DATABASE_URL` secret once
+  a production Postgres + ingestion are running. The capability is built and tested now; only the
+  live switch is deferred to deployment.
 
 ## 5. Async-in-sync
 
