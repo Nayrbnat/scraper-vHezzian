@@ -22,7 +22,7 @@ class SummarizerSettings(BaseSettings):
     SUMMARY_INTERESTS: str = Field(default="")  # CSV → criterion #4
     SUMMARY_BATCH_SIZE: int = Field(default=20)
     SUMMARY_MAX_INPUT_CHARS: int = Field(default=12000)
-    SUMMARY_REQUEST_TIMEOUT: float = Field(default=30.0)
+    SUMMARY_REQUEST_TIMEOUT: float = Field(default=90.0)  # GLM-4.5 reasoning calls run 12-30s+
     SUMMARY_INTER_REQUEST_DELAY: float = Field(default=1.0)
     SUMMARY_MAX_RETRIES: int = Field(default=2)  # 429/timeout retries before LLMRateLimitError
 
