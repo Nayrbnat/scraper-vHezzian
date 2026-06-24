@@ -1914,3 +1914,60 @@ class RedditSettings(BaseSettings):
     **Relevance digest carve-out (Phase 2.5).** `digest/postgres_source.py` is a read-only
     async query over Postgres (inlined SQL — not in `repositories.py`); it is consumed by the
     once-daily `digest send` CLI command, not by any pipeline worker. See §3.25.
+
+    **Lean Render-cron carve-out (Phase 6.5 — `pipeline/`).** For lean deployments on
+    serverless infrastructure (Render Cron Jobs + Neon Postgres), ScrapeForge supports a
+    run-once job path that skips Redis and MinIO entirely. Three Render Cron Jobs replace the
+    always-on docker-compose stack: `init-db` (deploy hook), `ingest` (hourly/daily), and
+    `summarize` (daily). See §3.26.
+
+---
+
+## 3.26 Pipeline Sub-App (`scrapeforge/pipeline/`)
+
+The `pipeline` package provides a lightweight **run-once-per-invocation** alternative to the
+always-on docker-compose worker stack. It is designed for lean deployments on Render Cron Jobs
+backed by Neon Postgres — no Redis, no MinIO, no persistent worker process.
+
+### Package contents
+
+| File | Role |
+|------|------|
+| `pipeline/__init__.py` | Package marker |
+| `pipeline/jobs.py` | Pure-async job functions (`init_db`, `ingest_publications`); injected with fakes in tests |
+| `pipeline/cli.py` | Typer sub-app `pipeline_app` mounted in root `cli.py`; the only file that calls `asyncio.run()` (sanctioned CLI entry-point, Invariant #12) |
+
+### Commands (`scrapeforge pipeline <cmd>`)
+
+| Command | Purpose | Render trigger |
+|---------|---------|----------------|
+| `init-db` | `CREATE EXTENSION IF NOT EXISTS vector` + `Base.metadata.create_all` + `ensure_summary_columns` — idempotent, re-runable | One-off "Deploy Job" |
+| `ingest [--limit N] [--sector S] [--max M]` | Scrape curated Substacks → UPSERT into Postgres via `PostgresSink` (no queue, no object store) | Hourly/daily Cron Job |
+| `summarize` | Drain `articles WHERE summary IS NULL` → LLM → UPDATE; exits when done | Daily Cron Job (after ingest) |
+
+### How it differs from the event-driven worker stack
+
+| Concern | docker-compose (always-on) | Render Cron (run-once) |
+|---------|--------------------------|----------------------|
+| Queue | Redis `MessageQueue` | None — direct function call |
+| Object store | MinIO `ObjectStore` (claim-check) | None — UPSERT directly |
+| Process model | Long-running worker drains queue | One-shot: run, drain, exit |
+| Infra | VPS + Docker Compose | Render Cron + Neon |
+| Resumability | Queue + DLQ | Idempotent UPSERT (sha256 dedup) |
+
+The run-once jobs call the same `PostgresSink`, `SubstackScraper`, and `OpenAICompatibleSummarizer`
+that the full pipeline uses — only the transport layer (queue vs. direct call) differs.
+
+### `DATABASE_SSL` — opt-in TLS for Neon
+
+`core/db/session.py::make_engine` calls `_ssl_connect_args()` which returns
+`{"ssl": True}` when `DATABASE_SSL` is set to `require`, `true`, or `1` (case-insensitive).
+When unset (local dev, CI), SSL is off. On Render, set `DATABASE_SSL=require` in the service
+environment to satisfy Neon's TLS requirement.
+
+```
+DATABASE_SSL=require   # Render + Neon (serverless Postgres requires TLS)
+# (unset)             # local dev / CI — plain connection
+```
+
+No code change is needed to switch between plain and TLS — the env var is the only knob.

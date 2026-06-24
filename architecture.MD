@@ -124,6 +124,11 @@ scrapeforge/
 │   ├── state_store.py              # StateStore: encrypted Fernet vault for session states
 │   └── sso_handler.py              # SSOHandler: interactive login (VNC / headful Chrome)
 │
+├── pipeline/                       # === RUN-ONCE PIPELINE JOBS (Phase 6.5 — Render Cron / Neon) ===
+│   ├── __init__.py
+│   ├── jobs.py                     # init_db(), ingest_publications(): pure-async, no Typer, injectable fakes
+│   └── cli.py                      # pipeline_app Typer sub-app (init-db / ingest / summarize); mounted by root cli.py
+│
 ├── digest/                         # === RELEVANCE DIGEST (Phase 2.5) ===
 │   ├── __init__.py
 │   ├── models.py                   # DigestItem (+ bullets/relevance/reason fields), DigestSection (key inc. "top"), Digest
@@ -213,6 +218,8 @@ scrapeforge/
 | `digest/settings.py` | `DigestSettings`: per-module `BaseSettings` fragment; `DIGEST_RELEVANCE_FLOOR` (5), `DIGEST_TOP_N` (10), `DIGEST_WINDOW_HOURS` (48) | `digest/cli.py`, `postgres_source.py` | **Phase 2.5 — keep** |
 | `digest/renderer.py` | `render_html()` / `render_text()`: bullets+badge+reason path when `item.bullets` non-empty; legacy keyword path otherwise; `_badge_html()` coloured pill | `digest/cli.py` | **Phase 2.5 — keep** |
 | `digest/cli.py` | Typer sub-app: `digest send --source [sample|postgres] --yes`; mounted by root `cli.py` | ops, CI | **Phase 2.5 — keep** |
+| `pipeline/jobs.py` | `init_db(engine)`: pgvector ext + tables + summary columns (idempotent); `ingest_publications(...)`: scrape curated Substacks → `PostgresSink` UPSERT (no queue/object store) | `pipeline/cli.py`, tests | **Phase 6.5 — keep** |
+| `pipeline/cli.py` | `pipeline_app` Typer sub-app: `init-db` / `ingest` / `summarize` commands; `asyncio.run` entry-points (Invariant #12); mounted by root `cli.py` | ops, Render Cron | **Phase 6.5 — keep** |
 | `api/` | FastAPI serving plane: read + enqueue only; never drives a browser | external clients | **Serving — keep** |
 | `worker/` | arq workers + scheduler: consume jobs → `ScrapeEngine` → `PostgresSink` | queue | **Ingestion — keep** |
 | `deployment/` | Docker Compose + Dockerfiles + Caddy (single-VPS host) | ops | **Infra — keep** |
@@ -599,6 +606,52 @@ unchanged).  This is a **read-only CLI carve-out** from the pipeline — it neve
 or writes Postgres.  CI keeps `--source sample`; production sets the `DIGEST_SOURCE` repo
 variable to `"postgres"` (see `daily-digest.yml` NOTE block and SPEC §3.25).
 
+### 7.6 Lean Render-Cron Deployment (alternative to always-on docker-compose)
+
+The `pipeline/` sub-app enables a **serverless cron** deployment pattern on Render + Neon that
+skips Redis and MinIO — useful before you need a persistent message queue or object store.
+
+```
+Render Cron Job: "init-db" (Deploy Hook, one-off)
+  scrapeforge pipeline init-db
+    └── make_engine(DATABASE_URL, ssl=DATABASE_SSL) → init_db(engine)
+          ├── CREATE EXTENSION IF NOT EXISTS vector
+          ├── Base.metadata.create_all (idempotent DDL)
+          └── ensure_summary_columns (idempotent ALTER)
+
+Render Cron Job: "ingest" (e.g. every 6 hours)
+  scrapeforge pipeline ingest --limit 25
+    └── ingest_publications(session_factory, SubstackScraper(), sources, limit)
+          ├── scrape_publication(base_url) → List[ScrapeResult]
+          └── PostgresSink.write(result)  [idempotent UPSERT by sha256(url)]
+
+Render Cron Job: "summarize" (daily, after ingest)
+  scrapeforge pipeline summarize
+    └── run_summarize_worker(session_factory, OpenAICompatibleSummarizer, settings)
+          ├── SELECT articles WHERE summary IS NULL ORDER BY fetched_at DESC
+          ├── LLM(article) → {bullets, relevance, reason}
+          └── UPDATE articles SET relevance=…, summary=… (idempotent)
+```
+
+**vs. docker-compose (always-on):**
+
+| | docker-compose | Render Cron |
+|-|---------------|-------------|
+| Broker | Redis | none |
+| Object store | MinIO | none |
+| Process model | long-running drain loop | run-once, exit |
+| Hosting cost | VPS + containers | Render free/starter + Neon free |
+| When to use | high-volume / multi-source | lean start, single scraper |
+
+Both paths share identical `PostgresSink`, `SubstackScraper`, `OpenAICompatibleSummarizer` and
+`DigestSettings` — only the transport layer changes.
+
+**Neon TLS.** Set `DATABASE_SSL=require` as a Render environment variable. `make_engine` calls
+`_ssl_connect_args()` which returns `{"ssl": True}` when the variable is truthy; local/CI leaves
+it unset (no TLS, no code change required).
+
+---
+
 ### Endpoints
 
 | Method · Path | Auth | Purpose |
@@ -639,6 +692,8 @@ All data endpoints require an `X-API-Key` header (per-key rate-limited). Hosting
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
+| `DATABASE_URL` | Yes (server) | — | SQLAlchemy async URL for Postgres (`postgresql+asyncpg://...`) |
+| `DATABASE_SSL` | No | (unset) | Set to `require`/`true`/`1` to enable TLS connect-args (`asyncpg`). Required for Neon Postgres on Render; leave unset for local/CI plain Postgres. |
 | `STATE_STORE_KEY` | Yes | — | Fernet encryption key (32+ chars, base64) |
 | `PROXY_LIST_PATH` | No | `./proxies.txt` | Path to proxy list file |
 | `LOG_LEVEL` | No | `INFO` | DEBUG, INFO, WARNING, ERROR |
