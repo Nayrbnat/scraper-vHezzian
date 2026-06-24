@@ -36,3 +36,35 @@ def init_db_cmd() -> None:
 
     asyncio.run(_run())
     typer.echo("init-db: schema ready.")
+
+
+@pipeline_app.command("ingest")
+def ingest_cmd(
+    limit: int = typer.Option(25, "--limit", "-l", help="Max posts per publication"),
+    sector: str | None = typer.Option(None, "--sector", "-s", help="Only this sector"),
+    max_pubs: int | None = typer.Option(None, "--max", "-m", help="Cap number of publications"),
+) -> None:
+    """Scrape the curated Substacks straight into Postgres (no Redis/MinIO)."""
+    _use_selector_loop()
+    from scrapeforge.config.settings import Settings
+    from scrapeforge.core.db.session import make_engine, make_sessionmaker
+    from scrapeforge.pipeline.jobs import ingest_publications
+    from scrapeforge.scrapers.community.substack import SubstackScraper
+    from scrapeforge.scrapers.community.substack_sources import select_sources
+
+    sources = select_sources(sector=sector, limit=max_pubs)
+
+    async def _run() -> int:
+        engine = make_engine(Settings().DATABASE_URL)
+        try:
+            return await ingest_publications(
+                session_factory=make_sessionmaker(engine),
+                scraper=SubstackScraper(),
+                sources=sources,
+                limit=limit,
+            )
+        finally:
+            await engine.dispose()
+
+    n = asyncio.run(_run())
+    typer.echo(f"ingest: persisted {n} articles from {len(sources)} publication(s).")
