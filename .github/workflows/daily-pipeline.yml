@@ -81,3 +81,8 @@ jobs:
           else
             python -m scrapeforge pipeline summarize
           fi
+
+      - name: Prune old / irrelevant articles (storage cap)
+        # Keeps the Neon free-tier DB under its size limit: deletes oldest-beyond-window
+        # first, then low-relevance stale rows, then the oldest above the hard cap.
+        run: python -m scrapeforge pipeline prune
