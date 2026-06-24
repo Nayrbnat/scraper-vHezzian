@@ -331,7 +331,7 @@ class SubstackScraper(CommunityScraper):
         """Fetch *url* via the bridge and return the raw response body as a string.
 
         The raw-string twin of ``_fetch_json`` — used for the RSS feed (XML, not JSON). Same
-        one-shot bridge lifecycle (Invariant #7): reuse an injected bridge, else create a per-call one.
+        one-shot bridge lifecycle (Invariant #7): reuse an injected bridge, else create one.
         """
         bridge = self.bridge if self.bridge is not None else self._create_default_bridge(self.proxy)
         async with bridge as b:
