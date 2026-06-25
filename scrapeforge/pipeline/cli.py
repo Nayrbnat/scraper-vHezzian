@@ -275,3 +275,19 @@ def score_users_cmd() -> None:
 
     n = asyncio.run(_run())
     typer.echo(f"score-users: wrote {n} (user, article) score(s).")
+
+
+@pipeline_app.command("sync-users")
+def sync_users_cmd() -> None:
+    """Pull onboarded users from the hezzian app DB into user_profiles (skips if no URL set)."""
+    _use_selector_loop()
+    from scrapeforge.config.settings import Settings
+    from scrapeforge.pipeline.sync_settings import UserSyncSettings
+    from scrapeforge.pipeline.user_sync import run_sync_sync
+
+    hezzian_url = UserSyncSettings().HEZZIAN_DATABASE_URL
+    if not hezzian_url:
+        typer.echo("sync-users: skipped (no HEZZIAN_DATABASE_URL).")
+        return
+    n = run_sync_sync(Settings().DATABASE_URL, hezzian_url)
+    typer.echo(f"sync-users: synced {n} user(s).")
