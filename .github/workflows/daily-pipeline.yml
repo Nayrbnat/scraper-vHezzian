@@ -43,6 +43,8 @@ jobs:
       EMBED_API_KEY: ${{ secrets.EMBED_API_KEY }}
       EMBED_PROVIDER: ${{ vars.EMBED_PROVIDER || 'gemini' }}
       EMBED_MODEL: ${{ vars.EMBED_MODEL || 'gemini-embedding-001' }}
+      # --- user sync (Phase 3.6): read-only connection to the hezzian app DB ---
+      HEZZIAN_DATABASE_URL: ${{ secrets.HEZZIAN_DATABASE_URL }}
       # --- non-secrets ---
       DATABASE_SSL: require # asyncpg uses TLS to reach Neon
       SUMMARY_MODEL: ${{ vars.SUMMARY_MODEL || 'glm-4.5-flash' }}
@@ -90,6 +92,10 @@ jobs:
         # Upserts user_id='owner' from SUMMARY_PORTFOLIO/INTERESTS/FOCUS so the per-user path
         # runs for the owner. No API key needed.
         run: python -m scrapeforge pipeline seed-owner
+
+      - name: Sync onboarded users from the hezzian app DB into user_profiles
+        # Idle-skips when HEZZIAN_DATABASE_URL is unset, so the pipeline stays green pre-rollout.
+        run: python -m scrapeforge pipeline sync-users
 
       - name: Embed new articles (fills articles.embedding WHERE NULL)
         # Idle-skips when EMBED_API_KEY is unset, so the pipeline stays green pre-rollout.

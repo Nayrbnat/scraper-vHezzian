@@ -361,6 +361,25 @@ Only after this passes do we build the full proxy/humanize/escalation stack agai
 >   `DIGEST_USER_SCORE_FLOOR=0.0` (per-module fragment, no core `Settings` edit).
 > - **Out of scope:** timezones, unsubscribe link, per-user dedupe table, login/swipe UI.
 
+### Phase 3.6 — User sync (`hezzian` → `scraper_news`) (DELIVERED 2026-06-25)
+
+> ✅ **DELIVERED** (2026-06-25). Users live in the separate `hezzian` Neon DB (Clerk: `users` +
+> `user_profiles`); articles live in `scraper_news`. The sync job bridges them with no
+> cross-database joins.
+>
+> - **`pipeline sync-users`** — pulls onboarded users (`users JOIN user_profiles`,
+>   `deleted_at IS NULL AND onboarding_completed = true`) from `hezzian` and upserts them into
+>   `scraper_news.user_profiles` (interests jsonb → `portfolio`/`sectors`, composed `focus`).
+> - **`pipeline/sync_settings.py`** — `UserSyncSettings` per-module fragment;
+>   `HEZZIAN_DATABASE_URL` (idle-skip when empty); does not modify core `Settings`.
+> - **`pipeline/user_sync.py`** — `map_to_profile` (pure Python mapping); `fetch_onboarded_users`
+>   (static `text()` SELECT — sanctioned foreign-table exception); `sync_users` (upsert);
+>   `run_sync_sync` (two-engine bridge: read `hezzian`, write `scraper_news`).
+> - **Workflow position** — `daily-pipeline.yml` step after `seed-owner`, before `embed-profiles`;
+>   requires the `HEZZIAN_DATABASE_URL` GitHub Actions secret.
+> - **Live-validated** — 1 onboarded user synced + profile embedded against real Neon.
+> - **Out of scope:** two-live-DB CI test, webhook-driven sync, writing back to `hezzian`.
+
 ---
 
 ## 4. Phase 4: Bucket 1 — Premium News Paywalls
