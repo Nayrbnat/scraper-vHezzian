@@ -139,15 +139,18 @@ scrapeforge/
 │   ├── embeddings_jobs.py          # Phase 3: embed_articles / embed_profiles / score_users / seed_owner (injected Embedder)
 │   └── cli.py                      # pipeline_app Typer sub-app (init-db / ingest / summarize / prune / seed-owner / embed-articles / embed-profiles / score-users); mounted by root cli.py
 │
-├── digest/                         # === RELEVANCE DIGEST (Phase 2.5) ===
+├── digest/                         # === RELEVANCE DIGEST (Phase 2.5) + PER-USER DELIVERY (Phase 3.5) ===
 │   ├── __init__.py
 │   ├── models.py                   # DigestItem (+ bullets/relevance/reason fields), DigestSection (key inc. "top"), Digest
 │   ├── renderer.py                 # render_html() / render_text(): bullets+badge+reason path + legacy keyword path
 │   ├── sample_data.py              # built-in sample articles for --source sample (CI-safe, no DB)
 │   ├── relevance.py                # build_relevance_digest(): pure filter→sort→cap→wrap function (Phase 2.5)
 │   ├── postgres_source.py          # load_ranked_articles() async + load_ranked_articles_sync() bridge; inlined SQL (Phase 2.5)
-│   ├── settings.py                 # DigestSettings: per-module BaseSettings fragment (DIGEST_RELEVANCE_FLOOR/TOP_N/WINDOW_HOURS)
-│   └── cli.py                      # Typer sub-app: `digest send --source [sample|postgres] --yes`
+│   ├── settings.py                 # DigestSettings: per-module BaseSettings fragment (DIGEST_RELEVANCE_FLOOR/TOP_N/WINDOW_HOURS + Phase 3.5 DIGEST_USER_*)
+│   ├── service.py                  # deliver() owner digest; deliver_all() per-user failure-isolated loop (Phase 3.5)
+│   ├── user_source.py              # load active users + per-user cosine-ranked articles (Phase 3.5)
+│   ├── user_digest.py              # build_user_digest — per-user "Top updates" section (Phase 3.5)
+│   └── cli.py                      # Typer sub-app: `digest send`; `digest preview-all`; `digest send-all` (Phase 3.5)
 │
 ├── utils/                          # === UTILITIES ===
 │   ├── __init__.py
@@ -234,7 +237,10 @@ scrapeforge/
 | `digest/postgres_source.py` | `load_ranked_articles()` async + `load_ranked_articles_sync()` bridge; inlined SQL window query, relevance-ranked; not in `repositories.py` (seam rule) | `digest/cli.py` | **Phase 2.5 — keep** |
 | `digest/settings.py` | `DigestSettings`: per-module `BaseSettings` fragment; `DIGEST_RELEVANCE_FLOOR` (5), `DIGEST_TOP_N` (10), `DIGEST_WINDOW_HOURS` (48) | `digest/cli.py`, `postgres_source.py` | **Phase 2.5 — keep** |
 | `digest/renderer.py` | `render_html()` / `render_text()`: bullets+badge+reason path when `item.bullets` non-empty; legacy keyword path otherwise; `_badge_html()` coloured pill | `digest/cli.py` | **Phase 2.5 — keep** |
-| `digest/cli.py` | Typer sub-app: `digest send --source [sample|postgres] --yes`; mounted by root `cli.py` | ops, CI | **Phase 2.5 — keep** |
+| `digest/cli.py` | Typer sub-app: `digest send --source [sample|postgres] --yes`; `digest preview-all`; `digest send-all` (Phase 3.5); mounted by root `cli.py` | ops, CI | **Phase 2.5 + 3.5 — keep** |
+| `digest/service.py` | `deliver()` owner digest send; `deliver_all(*, source, sender) -> DeliverySummary` per-user failure-isolated loop (Phase 3.5) | `digest/cli.py` | **Phase 3.5 — keep** |
+| `digest/user_source.py` | `ActiveUser` dataclass; `load_active_users` (non-null email); `load_user_ranked_articles` (cosine join on `user_article_relevance`); `load_all_sync` bridge | `digest/service.py` | **Phase 3.5 — keep** |
+| `digest/user_digest.py` | `build_user_digest(user, articles)` — per-user `"top"` section in cosine order; shows shared 1–10 relevance + 5 bullets from `articles.summary` | `digest/service.py` | **Phase 3.5 — keep** |
 | `pipeline/jobs.py` | `init_db(engine)`: pgvector ext + tables + summary columns (idempotent); `ingest_publications(...)`: scrape curated Substacks → `PostgresSink` UPSERT (no queue/object store) | `pipeline/cli.py`, tests | **Phase 6.5 — keep** |
 | `pipeline/cli.py` | `pipeline_app` Typer sub-app: `init-db` / `ingest` / `summarize` commands; `asyncio.run` entry-points (Invariant #12); mounted by root `cli.py` | ops, Render Cron | **Phase 6.5 — keep** |
 | `api/` | FastAPI serving plane: read + enqueue only; never drives a browser | external clients | **Serving — keep** |
@@ -622,6 +628,12 @@ produces bullets+badge+reason HTML/text.  The digest is emailed via SMTP (existi
 unchanged).  This is a **read-only CLI carve-out** from the pipeline — it never enqueues jobs
 or writes Postgres.  CI keeps `--source sample`; production sets the `DIGEST_SOURCE` repo
 variable to `"postgres"` (see `daily-digest.yml` NOTE block and SPEC §3.25).
+
+**Per-user digest delivery (Phase 3.5).**  `daily-digest-users.yml` is a companion workflow
+(manual `workflow_dispatch`; `schedule:` commented until stable) that runs `digest send-all
+--source postgres`.  It reads `user_profiles WHERE email IS NOT NULL`, builds a cosine-ranked
+"Top updates" digest for each user, and sends via SMTP.  Per-user failures are isolated.  Shares
+the same `DATABASE_URL`, `EMBED_API_KEY`, and `DIGEST_SMTP_*` secrets as the owner digest.
 
 ### 7.6 Lean Render-Cron Deployment (alternative to always-on docker-compose)
 
