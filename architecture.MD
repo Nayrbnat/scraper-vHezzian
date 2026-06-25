@@ -242,7 +242,9 @@ scrapeforge/
 | `digest/user_source.py` | `ActiveUser` dataclass; `load_active_users` (non-null email); `load_user_ranked_articles` (cosine join on `user_article_relevance`); `load_all_sync` bridge | `digest/service.py` | **Phase 3.5 — keep** |
 | `digest/user_digest.py` | `build_user_digest(user, articles)` — per-user `"top"` section in cosine order; shows shared 1–10 relevance + 5 bullets from `articles.summary` | `digest/service.py` | **Phase 3.5 — keep** |
 | `pipeline/jobs.py` | `init_db(engine)`: pgvector ext + tables + summary columns (idempotent); `ingest_publications(...)`: scrape curated Substacks → `PostgresSink` UPSERT (no queue/object store) | `pipeline/cli.py`, tests | **Phase 6.5 — keep** |
-| `pipeline/cli.py` | `pipeline_app` Typer sub-app: `init-db` / `ingest` / `summarize` commands; `asyncio.run` entry-points (Invariant #12); mounted by root `cli.py` | ops, Render Cron | **Phase 6.5 — keep** |
+| `pipeline/sync_settings.py` | `UserSyncSettings` per-module `BaseSettings` fragment: `HEZZIAN_DATABASE_URL` (empty = idle-skip) | `pipeline/user_sync.py`, `pipeline/cli.py` | **Phase 3.6 — keep** |
+| `pipeline/user_sync.py` | `map_to_profile` (interests jsonb → portfolio/sectors/focus); `fetch_onboarded_users` (static `text()` SELECT on `hezzian`); `sync_users` (upsert into `scraper_news.user_profiles`); `run_sync_sync` (two-engine bridge) | `pipeline/cli.py` | **Phase 3.6 — keep** |
+| `pipeline/cli.py` | `pipeline_app` Typer sub-app: `init-db` / `ingest` / `summarize` / `sync-users` commands; `asyncio.run` entry-points (Invariant #12); mounted by root `cli.py` | ops, Render Cron | **Phase 6.5 + 3.6 — keep** |
 | `api/` | FastAPI serving plane: read + enqueue only; never drives a browser | external clients | **Serving — keep** |
 | `worker/` | arq workers + scheduler: consume jobs → `ScrapeEngine` → `PostgresSink` | queue | **Ingestion — keep** |
 | `deployment/` | Docker Compose + Dockerfiles + Caddy (single-VPS host) | ops | **Infra — keep** |
@@ -634,6 +636,19 @@ variable to `"postgres"` (see `daily-digest.yml` NOTE block and SPEC §3.25).
 --source postgres`.  It reads `user_profiles WHERE email IS NOT NULL`, builds a cosine-ranked
 "Top updates" digest for each user, and sends via SMTP.  Per-user failures are isolated.  Shares
 the same `DATABASE_URL`, `EMBED_API_KEY`, and `DIGEST_SMTP_*` secrets as the owner digest.
+
+**User sync (Phase 3.6).**  `pipeline sync-users` bridges the two-database gap: the `hezzian`
+Neon DB (Clerk: `users` + `user_profiles`) is separate from `scraper_news`.  `pipeline/user_sync.py`
+reads onboarded, non-deleted users from `hezzian` via a static `text()` SELECT (the sanctioned
+foreign-table exception), maps `interests` JSONB to `portfolio`/`sectors`/`focus` fields
+(`map_to_profile`), and upserts into `scraper_news.user_profiles` so the Phase-3 embedding
+pipeline can consume them.  `pipeline/sync_settings.py` holds `UserSyncSettings` with
+`HEZZIAN_DATABASE_URL`; an empty value idle-skips the step.  In `daily-pipeline.yml` the step
+runs **after `seed-owner` and before `embed-profiles`**:
+
+```
+init-db → ingest → summarize → prune → seed-owner → sync-users → embed-articles → embed-profiles → score-users
+```
 
 ### 7.6 Lean Render-Cron Deployment (alternative to always-on docker-compose)
 

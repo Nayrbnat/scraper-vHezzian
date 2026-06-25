@@ -159,6 +159,69 @@ The owner digest (`daily-digest.yml`) is completely unchanged by Phase 3.5.
 
 ---
 
+## 7. User sync (Phase 3.6)
+
+Users are managed by the Hezzian web app in a **separate** Neon database (`hezzian`). The sync
+job reads onboarded users from `hezzian` and upserts them into `scraper_news.user_profiles` so
+the Phase-3 embedding and per-user digest pipeline can consume them.
+
+### Required secret
+
+Add this to **Settings → Secrets and variables → Actions → Secrets**:
+
+| Secret | What to put |
+|---|---|
+| `HEZZIAN_DATABASE_URL` | asyncpg DSN for the `hezzian` Neon DB (`postgresql+asyncpg://…`). Same DSN-conversion rules as §1. |
+
+> **Idle-skip:** when `HEZZIAN_DATABASE_URL` is empty (or the secret is not set), the
+> `sync-users` step exits cleanly with a notice and the workflow stays green. No error, no
+> disruption to downstream steps. Set the secret only when you are ready to sync.
+
+### Required table shape in `hezzian`
+
+The `hezzian` database must expose these tables (Clerk creates them automatically):
+
+```sql
+-- users (Clerk manages)
+users (clerk_user_id text PRIMARY KEY, email text, deleted_at timestamptz)
+
+-- user_profiles (Hezzian app writes at onboarding)
+user_profiles (
+    user_id text REFERENCES users(clerk_user_id),
+    interests jsonb,           -- {watch_tickers, sectors, asset_classes, investor_type, …}
+    onboarding_completed boolean
+)
+```
+
+The sync job reads these tables with a static SELECT (no writes to `hezzian`). No migration is
+needed in `hezzian`; it is consumed read-only.
+
+### How it fits into `daily-pipeline.yml`
+
+The `sync-users` step runs **after `seed-owner` and before `embed-profiles`** so newly synced
+profiles are embedded in the same daily run:
+
+```
+init-db → ingest → summarize → prune → seed-owner → sync-users → embed-articles → embed-profiles → score-users
+```
+
+### First-run verification
+
+After setting `HEZZIAN_DATABASE_URL`, run the pipeline manually (Repo → **Actions** →
+**Daily pipeline** → **Run workflow**). Check the `sync-users` step log for:
+
+```
+Synced N users from hezzian → scraper_news
+```
+
+Then verify in the Neon SQL editor (`scraper_news`):
+
+```sql
+SELECT user_id, email, portfolio, sectors FROM user_profiles;
+```
+
+---
+
 ## Appendix — Render (paid alternative)
 
 `render.yaml` defines the same pipeline as four Render **Cron Jobs**. Render Cron Jobs are a

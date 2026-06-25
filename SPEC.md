@@ -1625,6 +1625,98 @@ until the deployment is stable. Runs `digest send-all --source postgres`. Requir
 
 ---
 
+### 3.29 User Sync (`hezzian` → `scraper_news`) — Phase 3.6
+
+**Responsibility:** pull onboarded users from the separate `hezzian` Neon database and upsert
+them into `scraper_news.user_profiles` so the Phase-3/3.5 embedding and digest pipeline can
+consume them without a cross-database join.
+
+#### Two-database reality
+
+Users are managed by the Hezzian web app in a **separate** Neon database (`hezzian`), using
+Clerk for authentication. The tables that live there are:
+
+- `users` — Clerk identity: `clerk_user_id`, `email`, `deleted_at`
+- `user_profiles` — onboarding answers: `user_id` (FK→`users.clerk_user_id`), `interests`
+  (JSONB), `onboarding_completed` (bool)
+
+Articles live in `scraper_news`. Postgres cannot join across databases, so a dedicated sync
+job bridges the gap by reading `hezzian` read-only and writing `scraper_news.user_profiles`
+(the table the Phase-3 pipeline already owns).
+
+#### Configuration (`pipeline/sync_settings.py`)
+
+`UserSyncSettings` is a per-module `BaseSettings` fragment — does **not** extend or modify the
+core `Settings` class (Invariant #16).
+
+| Variable | Default | Description |
+|---|---|---|
+| `HEZZIAN_DATABASE_URL` | `""` | asyncpg DSN for the `hezzian` Neon DB. **Empty string ⇒ sync idle-skips** (no error, no-op). |
+
+When `HEZZIAN_DATABASE_URL` is not set, `sync-users` exits cleanly with a notice, so the
+daily workflow stays green pre-rollout.
+
+#### Field mapping (`map_to_profile` in `pipeline/user_sync.py`)
+
+| `scraper_news.user_profiles` column | Source |
+|---|---|
+| `user_id` | `users.clerk_user_id` |
+| `email` | `users.email` |
+| `portfolio` | `interests['watch_tickers']` (list of ticker strings) |
+| `sectors` | `interests['sectors']` + `interests['asset_classes']` concatenated |
+| `focus` | `investor_type ; risk ; objective ; horizon ; regions` joined from matching `interests` keys |
+
+`interests` is a JSONB column; missing keys default to empty list / empty string. The mapping
+is pure Python (no SQL); it lives in `map_to_profile(row: dict) -> dict`.
+
+#### Source query
+
+`fetch_onboarded_users` issues a **static `text()` SELECT** (zero parameters, no f-strings)
+against the `hezzian` engine:
+
+```sql
+SELECT u.clerk_user_id, u.email,
+       up.interests
+FROM   users u
+JOIN   user_profiles up ON up.user_id = u.clerk_user_id
+WHERE  u.deleted_at IS NULL
+  AND  up.onboarding_completed = true
+```
+
+The use of SQLAlchemy `text()` here is the **sanctioned exception** to the ORM-only rule
+(Invariant #16): the `hezzian` schema is owned by a foreign app and not mapped via ScrapeForge
+ORM models, so static `text()` foreign-table reads are explicitly permitted. The query has no
+dynamic/external-data parameters and passes the `tests/test_no_raw_sql.py` guard.
+
+#### Sync logic (`pipeline/user_sync.py`)
+
+- **`sync_users(session, rows)`** — upserts each mapped profile into `scraper_news.user_profiles`
+  (`ON CONFLICT (user_id) DO UPDATE`). The pipeline is the **sole writer** of this table in
+  `scraper_news`; the Hezzian app writes to its own copy in `hezzian`.
+- **`run_sync_sync()`** — two-engine bridge: builds an async read engine for `hezzian` (from
+  `HEZZIAN_DATABASE_URL`) and a write engine for `scraper_news` (from `DATABASE_URL`), calls
+  `fetch_onboarded_users` on the read engine, then `sync_users` on the write engine. Returns
+  the count of upserted rows.
+
+#### CLI command
+
+`pipeline sync-users` — added to the `pipeline_app` Typer sub-app (`pipeline/cli.py`).
+Idles with a notice when `HEZZIAN_DATABASE_URL` is empty. Placed before `embed-profiles`
+in the daily workflow so freshly synced profiles are embedded in the same run.
+
+#### Daily workflow integration (`daily-pipeline.yml`)
+
+The `sync-users` step runs **after `seed-owner` and before `embed-profiles`**:
+
+```
+init-db → ingest → summarize → prune → seed-owner → sync-users → embed-articles → embed-profiles → score-users
+```
+
+Requires the `HEZZIAN_DATABASE_URL` GitHub Actions secret. Until that secret is set, the step
+idle-skips and the workflow stays green.
+
+---
+
 ## 4. Humanization Utilities
 
 ### 4.1 `MousePathGenerator`
