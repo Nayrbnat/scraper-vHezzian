@@ -77,6 +77,42 @@ def ingest_cmd(
     typer.echo(f"ingest: persisted {n} articles from {len(sources)} publication(s) via {mode}.")
 
 
+@pipeline_app.command("ingest-reddit")
+def ingest_reddit_cmd(
+    limit: int = typer.Option(20, "--limit", "-l", help="Max posts fetched per subreddit"),
+    sector: str | None = typer.Option(None, "--sector", "-s", help="Only this sector"),
+    max_subs: int | None = typer.Option(None, "--max", "-m", help="Cap number of subreddits"),
+    sort: str = typer.Option("hot", "--sort", help="Reddit listing sort (hot/new/top/rising)"),
+    min_score: int = typer.Option(25, "--min-score", help="Drop posts below this Reddit score"),
+) -> None:
+    """Scrape curated investing/AI subreddits straight into Postgres (self-posts only)."""
+    _use_selector_loop()
+    from scrapeforge.config.settings import Settings
+    from scrapeforge.core.db.session import make_engine, make_sessionmaker
+    from scrapeforge.pipeline.jobs import ingest_subreddits
+    from scrapeforge.scrapers.community.reddit import RedditScraper
+    from scrapeforge.scrapers.community.reddit_sources import select_subreddits
+
+    subreddits = select_subreddits(sector=sector, limit=max_subs)
+
+    async def _run() -> int:
+        engine = make_engine(Settings().DATABASE_URL)
+        try:
+            return await ingest_subreddits(
+                session_factory=make_sessionmaker(engine),
+                scraper=RedditScraper(),
+                subreddits=subreddits,
+                limit=limit,
+                sort=sort,
+                min_score=min_score,
+            )
+        finally:
+            await engine.dispose()
+
+    n = asyncio.run(_run())
+    typer.echo(f"ingest-reddit: persisted {n} posts from {len(subreddits)} subreddit(s).")
+
+
 @pipeline_app.command("prune")
 def prune_cmd(
     days: int | None = typer.Option(None, "--days", help="Override retention window (days)."),

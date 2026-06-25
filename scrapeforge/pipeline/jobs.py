@@ -70,3 +70,57 @@ async def ingest_publications(
         failed,
     )
     return persisted
+
+
+async def ingest_subreddits(
+    *,
+    session_factory,
+    scraper,
+    subreddits,
+    limit: int,
+    sort: str = "hot",
+    min_score: int = 25,
+) -> int:
+    """Scrape each subreddit and UPSERT its quality self-posts into Postgres.
+
+    Mirrors :func:`ingest_publications` for Bucket 2 Reddit: drives the injected scraper's
+    ``scrape_subreddit`` and persists via the idempotent ``PostgresSink``. v1 keeps the corpus
+    high-signal by persisting only **self-posts with real text** (link posts have empty content —
+    fetching the linked article is Bucket-3 work) whose Reddit ``score`` is at least *min_score*
+    (cuts low-engagement meme noise). One subreddit's failure (HTTP 429, soft-block) is logged and
+    skipped so the rest still ingest. Returns the number of articles persisted.
+    """
+    sink = PostgresSink(session_factory)
+    persisted = 0
+    failed = 0
+    for source in subreddits:
+        try:
+            results = await scraper.scrape_subreddit(source.subreddit, limit=limit, sort=sort)
+        except Exception as exc:  # noqa: BLE001
+            # Broad on purpose: a datacenter-IP soft-block (the GitHub Actions case) can return a
+            # non-JSON challenge body or a payload without the expected keys, raising
+            # JSONDecodeError/KeyError/TypeError — not just ScrapeForgeError. One subreddit's
+            # failure must never abort the batch, so isolate it here and let the rest ingest.
+            failed += 1
+            log.warning("ingest-reddit: skipping r/%s — scrape failed: %s", source.subreddit, exc)
+            continue
+        for result in results:
+            if result.status != "success" or result.article is None:
+                continue
+            article = result.article
+            if not (article.content or "").strip():
+                continue  # link post / empty self-post — no text for the summarizer
+            score = article.metadata.get("score")
+            if isinstance(score, int) and score < min_score:
+                continue  # below the engagement floor
+            if sink.seen(article.url):
+                continue
+            await sink.write(result)
+            persisted += 1
+    log.info(
+        "ingest-reddit: persisted %d posts across %d subreddits (%d failed)",
+        persisted,
+        len(subreddits),
+        failed,
+    )
+    return persisted
