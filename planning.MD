@@ -335,6 +335,34 @@ Only after this passes do we build the full proxy/humanize/escalation stack agai
 
 ---
 
+### Per-User Email Delivery — Phase 3.5
+
+> ✅ **DELIVERED** (2026-06-25). Each active user in `user_profiles` with a non-null `email`
+> receives their own cosine-ranked "Top updates" digest; failures are per-user isolated; empty
+> digests are skipped automatically.
+>
+> - **`user_profiles` schema** — `email text NULL` column added (live migration: `ALTER TABLE
+>   user_profiles ADD COLUMN email text;`). The Hezzian app writes
+>   `user_profiles(user_id, email, portfolio, sectors, focus)` at user signup via Clerk. `NULL`
+>   ⇒ user skipped at send time.
+> - **`digest/user_source.py`** — `ActiveUser` dataclass; `load_active_users` (reads
+>   `user_profiles WHERE email IS NOT NULL`); `load_user_ranked_articles` (cosine join on
+>   `user_article_relevance`); `load_all_sync` bridge.
+> - **`digest/user_digest.py`** — `build_user_digest(user, articles)`: per-user `"top"` section
+>   in cosine order, showing shared 1–10 relevance + 5 summary bullets from `articles.summary`.
+> - **`digest/service.py`** — `deliver_all(*, source, sender) -> DeliverySummary`: loads all
+>   active users, builds + sends per-user digest, skips empty, isolates per-user failures.
+>   Existing `deliver()` (owner digest) is **untouched**.
+> - **New CLI commands** — `digest preview-all` (write preview HTML, no send); `digest send-all`
+>   (SMTP-send each active user).
+> - **`daily-digest-users.yml`** — `workflow_dispatch` trigger; `schedule:` commented until
+>   stable; runs `digest send-all --source postgres`.
+> - **Settings** — `DIGEST_USER_TOP_N=10`, `DIGEST_USER_WINDOW_HOURS=48`,
+>   `DIGEST_USER_SCORE_FLOOR=0.0` (per-module fragment, no core `Settings` edit).
+> - **Out of scope:** timezones, unsubscribe link, per-user dedupe table, login/swipe UI.
+
+---
+
 ## 4. Phase 4: Bucket 1 — Premium News Paywalls
 **Goal:** The hardest bucket. Bloomberg, FT, WSJ, Economist.
 **Duration:** 5–7 days  
@@ -689,6 +717,7 @@ auth/StateStore (Phase 4) for gated sources; embeddings (Phase 8) for semantic r
 | AI Summaries + Relevance (Phase 2) | ✅ delivered | — | `core/llm/` port + GLM-4.5-Flash adapter; `relevance` INT + `summary` JSONB columns; batch summarize worker; idempotent migrations |
 | Relevance Digest (Phase 2.5) | ✅ delivered | — | `digest/relevance.py` + `postgres_source.py` + `settings.py`; `DigestItem` bullets/relevance/reason; renderer badge+bullets path; `DIGEST_SOURCE` workflow variable; next: Phase 4 swipe UI |
 | Multi-user Relevance (Phase 3) | ✅ delivered | — | `core/embeddings/` Embedder port (Gemini + Jina) + `pipeline/embeddings_jobs.py` (embed-articles/embed-profiles/score-users/seed-owner) + 3 contract tables (pgvector cosine, no per-user LLM); deploy secret `EMBED_API_KEY`; next: Phase 4 swipe UI / feed |
+| Per-user Email Delivery (Phase 3.5) | ✅ delivered | — | `digest/user_source.py` + `user_digest.py` + `service.deliver_all` + `digest preview-all`/`send-all` CLI commands + `daily-digest-users.yml`; `email text NULL` on `user_profiles`; per-user failure isolation; empty digests skipped |
 | **Live deployment — Render + Neon (Phase 6.5)** | **🔄 ACTIVE** | — | `pipeline/` sub-app (`init-db`/`ingest`/`summarize`); lean run-once Render Cron Jobs backed by Neon Postgres; `DATABASE_SSL` opt-in TLS; SQLi-audit guard (`tests/test_no_raw_sql.py`). Swipe app (Phase 9) and protected buckets deferred. |
 | Phase 4: Bucket 1 | 5–7 days | Day 19 | Premium paywall scraper, auth system |
 | Phase 5: Integration | 3–4 days | Day 23 | Engine, docs, performance, final QA |

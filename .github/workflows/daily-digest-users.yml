@@ -1,0 +1,50 @@
+name: Daily per-user digests
+
+# Sends every active user (user_profiles.email IS NOT NULL) their own relevance-ranked digest.
+#
+# Ships MANUAL-ONLY (workflow_dispatch). Before enabling the daily schedule below you MUST:
+#   1. Run once on the live DB:  ALTER TABLE user_profiles ADD COLUMN email text;
+#   2. Have the Hezzian app writing user_profiles rows (user_id, email, portfolio, sectors).
+#   3. Set the DATABASE_URL secret (postgresql+asyncpg://user:pass@host:port/db) and DIGEST_SMTP_*.
+#   4. Uncomment the `schedule:` block.
+# Until then, run it by hand from the Actions tab to preview real behavior.
+
+on:
+  workflow_dispatch: {}
+  # schedule:
+  #   - cron: "0 8 * * *" # 08:00 UTC = 09:00 London (BST)
+  #   - cron: "0 9 * * *" # 09:00 UTC = 09:00 London (GMT)
+
+permissions:
+  contents: read
+
+jobs:
+  send-user-digests:
+    name: send per-user digests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+          cache-dependency-glob: "pyproject.toml"
+
+      - name: Create venv
+        run: |
+          uv venv --python 3.12
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Install project (runtime only)
+        run: uv pip install -e .
+
+      - name: Send per-user digests
+        env:
+          DIGEST_SMTP_USER: ${{ secrets.DIGEST_SMTP_USER }}
+          DIGEST_SMTP_PASSWORD: ${{ secrets.DIGEST_SMTP_PASSWORD }}
+          DIGEST_FROM: ${{ secrets.DIGEST_FROM }}
+          STATE_STORE_KEY: ci-digest-placeholder-not-used-000000000000
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_SSL: require
+        run: python -m scrapeforge digest send-all --yes --source postgres

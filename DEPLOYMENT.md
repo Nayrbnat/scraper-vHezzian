@@ -118,6 +118,47 @@ adjustment needed.
 
 ---
 
+## 6. Per-user digests (Phase 3.5)
+
+### One-time live migration
+
+`create_all` (called by `init-db`) creates tables but does **not** alter existing ones. Run this
+once in the Neon SQL editor after deploying Phase 3.5:
+
+```sql
+ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS email text;
+```
+
+No Alembic — this is the correct manual step. The column is nullable; existing rows remain
+unaffected and are skipped at send time.
+
+### Hezzian app responsibility
+
+The Hezzian web app (Clerk-authenticated) must write a row to `user_profiles` at user signup:
+
+```sql
+INSERT INTO user_profiles (user_id, email, portfolio, sectors, focus, updated_at)
+VALUES ($1, $2, $3, $4, $5, now())
+ON CONFLICT (user_id) DO UPDATE SET email = EXCLUDED.email, updated_at = now();
+```
+
+The pipeline is read-only against `user_profiles`. If `email IS NULL` the user is silently
+skipped at send time. If the user has no scored articles (no entries in `user_article_relevance`)
+their digest is also skipped.
+
+### Activate the per-user workflow
+
+1. Verify that `DATABASE_URL`, `EMBED_API_KEY`, `DIGEST_SMTP_USER`, `DIGEST_SMTP_PASSWORD`,
+   `DIGEST_FROM` secrets are all set (reuse the ones from §2).
+2. Open `.github/workflows/daily-digest-users.yml` and uncomment the `schedule:` block when
+   ready to run daily.
+3. Test first: Repo → **Actions** → **Daily digest (per-user)** → **Run workflow** (manual
+   dispatch). Confirm each active user receives their own ranked email.
+
+The owner digest (`daily-digest.yml`) is completely unchanged by Phase 3.5.
+
+---
+
 ## Appendix — Render (paid alternative)
 
 `render.yaml` defines the same pipeline as four Render **Cron Jobs**. Render Cron Jobs are a

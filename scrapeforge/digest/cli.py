@@ -13,7 +13,7 @@ from pathlib import Path
 import typer
 
 from scrapeforge.digest.sender import PreviewEmailSender, SmtpEmailSender
-from scrapeforge.digest.service import deliver
+from scrapeforge.digest.service import deliver, deliver_all
 
 digest_app = typer.Typer(help="Hezzian personalized email digests (prototype)")
 
@@ -76,3 +76,37 @@ def send(
         raise typer.Exit(code=1) from exc
     sent_to = to or digest.subscriber_email
     typer.echo(f"Sent digest to {sent_to} ({digest.total_items} items).")
+
+
+@digest_app.command("preview-all")
+def preview_all(
+    source: str = typer.Option(
+        "postgres", "--source", help="Per-user source (only 'postgres' is supported)"
+    ),
+    out_dir: Path = typer.Option(  # noqa: B008
+        Path("./output/digests"), "--out-dir", "-o", help="Where to write per-user preview HTML"
+    ),
+) -> None:
+    """Build + render every active user's digest and write preview HTML (no email is sent)."""
+    _load_dotenv()
+    summary = deliver_all(source=source, sender=PreviewEmailSender(out_dir))
+    typer.echo(f"Per-user digests (preview): {summary}")
+
+
+@digest_app.command("send-all")
+def send_all(
+    source: str = typer.Option(
+        "postgres", "--source", help="Per-user source (only 'postgres' is supported)"
+    ),
+    yes: bool = typer.Option(False, "--yes", help="Skip the confirmation prompt"),
+) -> None:
+    """Send every active user their own relevance-ranked digest via SMTP (needs DIGEST_SMTP_*)."""
+    _load_dotenv()
+    if not yes:
+        typer.confirm("Send real per-user emails via SMTP to ALL active users now?", abort=True)
+    try:
+        summary = deliver_all(source=source, sender=SmtpEmailSender())
+    except ValueError as exc:  # missing credentials or unsupported source
+        typer.echo(f"Cannot send: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"Per-user digests sent: {summary}")
