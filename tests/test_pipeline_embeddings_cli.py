@@ -21,6 +21,9 @@ def test_embed_articles_skips_without_key(monkeypatch) -> None:
 def test_embed_articles_runs_with_key(monkeypatch) -> None:
     monkeypatch.setenv("EMBED_API_KEY", "k")
     monkeypatch.setenv("DATABASE_URL", _DSN)
+    # Settings() is constructed inside the command; CI has no .env, so supply the
+    # required (throwaway) STATE_STORE_KEY here to keep this test hermetic.
+    monkeypatch.setenv("STATE_STORE_KEY", "dGVzdC1rZXktMzItYnl0ZXMtZm9yLWZlcm5ldC1vbmx5MDA=")
 
     called = {}
 
