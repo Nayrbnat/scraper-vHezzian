@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 
-def test_settings_defaults_to_gemini_1536() -> None:
+def test_settings_defaults_to_gemini_1536(monkeypatch) -> None:
     from scrapeforge.core.embeddings.settings import EmbedderSettings
 
-    s = EmbedderSettings()
+    # Hermetic: ignore any real .env / OS env so we test the code's factory defaults,
+    # not the developer's local configuration.
+    keys = ("EMBED_PROVIDER", "EMBED_API_KEY", "EMBED_MODEL", "EMBED_DIM", "EMBED_API_BASE_URL")
+    for key in keys:
+        monkeypatch.delenv(key, raising=False)
+    s = EmbedderSettings(_env_file=None)
     assert s.EMBED_PROVIDER == "gemini"
     assert s.EMBED_MODEL == "gemini-embedding-001"
     assert s.EMBED_DIM == 1536
