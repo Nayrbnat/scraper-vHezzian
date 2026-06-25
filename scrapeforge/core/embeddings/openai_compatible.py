@@ -8,6 +8,7 @@ import logging
 
 import httpx
 
+from scrapeforge.core.embeddings._vectors import finalize_vector
 from scrapeforge.core.embeddings.base import Embedder
 from scrapeforge.core.embeddings.exceptions import (
     EmbeddingError,
@@ -54,7 +55,7 @@ class OpenAICompatibleEmbedder(Embedder):
             emb = item.get("embedding") if isinstance(item, dict) else None
             if not isinstance(emb, list) or not emb:
                 raise EmbeddingParseError("embedding item missing 'embedding'")
-            vectors.append([float(x) for x in emb])
+            vectors.append(finalize_vector([float(x) for x in emb], self._s.EMBED_DIM))
         return vectors
 
     async def _post_with_retry(self, url: str, payload: dict, headers: dict) -> dict:

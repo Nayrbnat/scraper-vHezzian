@@ -11,7 +11,7 @@ import hashlib
 import logging
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -174,11 +174,14 @@ async def score_users(
         uvec_list = list(uvec)
         distance = Article.embedding.cosine_distance(uvec_list)
         async with session_factory() as session:
+            await session.execute(
+                delete(UserArticleRelevance).where(UserArticleRelevance.user_id == user_id)
+            )
             ranked = (
                 await session.execute(
                     select(Article.id, distance.label("dist"))
                     .where(Article.embedding.is_not(None), Article.fetched_at >= cutoff)
-                    .order_by(distance)
+                    .order_by(distance, Article.id)
                     .limit(top_k)
                 )
             ).all()
@@ -186,7 +189,7 @@ async def score_users(
                 stmt = pg_insert(UserArticleRelevance).values(
                     user_id=user_id,
                     article_id=article_id,
-                    score=1.0 - float(dist),
+                    score=1.0 - float(dist),  # cosine similarity in [-1, 1]
                     computed_at=now,
                 )
                 stmt = stmt.on_conflict_do_update(

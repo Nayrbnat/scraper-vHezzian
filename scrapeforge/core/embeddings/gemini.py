@@ -14,6 +14,7 @@ import logging
 
 import httpx
 
+from scrapeforge.core.embeddings._vectors import finalize_vector
 from scrapeforge.core.embeddings.base import Embedder
 from scrapeforge.core.embeddings.exceptions import (
     EmbeddingError,
@@ -65,7 +66,7 @@ class GeminiEmbedder(Embedder):
             values = item.get("values") if isinstance(item, dict) else None
             if not isinstance(values, list) or not values:
                 raise EmbeddingParseError("embedding item missing 'values'")
-            vectors.append([float(x) for x in values])
+            vectors.append(finalize_vector([float(x) for x in values], self._s.EMBED_DIM))
         return vectors
 
     async def _post_with_retry(self, url: str, payload: dict) -> dict:

@@ -220,3 +220,35 @@ async def test_score_users_respects_window(db_session, session_factory) -> None:
 
     n = await score_users(session_factory=session_factory, window_days=30, top_k=10)
     assert n == 0  # the only article is older than the 30-day window
+
+
+@pytest.mark.db
+async def test_score_users_replaces_stale_rows(db_session, session_factory) -> None:
+    from scrapeforge.pipeline.embeddings_jobs import score_users
+
+    now = datetime.now(UTC)
+    ai_vec = [1.0, 0.0, 0.0] + [0.0] * 1533
+    # In-window article — will be scored
+    await _add_article(
+        session_factory, id_="a" * 64, title="AI", content="x", fetched_at=now, embedding=ai_vec
+    )
+    # Out-of-window article — satisfies the FK for the stale relevance row but won't re-appear
+    await _add_article(
+        session_factory,
+        id_="z" * 64,
+        title="stale",
+        content="x",
+        fetched_at=now - timedelta(days=99),
+        embedding=ai_vec,
+    )
+    async with session_factory() as s:
+        s.add(UserProfileVector(user_id="u", embedding=ai_vec, source_hash="h", updated_at=now))
+        # A stale score for an article outside the scoring window
+        s.add(UserArticleRelevance(user_id="u", article_id="z" * 64, score=0.01, computed_at=now))
+        await s.commit()
+
+    n = await score_users(session_factory=session_factory, window_days=30, top_k=10)
+    assert n == 1  # only the in-window "aaa..." article is scored
+    rows = (await db_session.execute(select(UserArticleRelevance))).scalars().all()
+    # The stale "zzz..." row is gone; only the current top-K ("aaa...") remains
+    assert [r.article_id for r in rows] == ["a" * 64]
