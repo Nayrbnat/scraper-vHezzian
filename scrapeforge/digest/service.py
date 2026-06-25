@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -12,6 +14,8 @@ from scrapeforge.digest.models import Digest, Subscriber
 from scrapeforge.digest.render import RenderedEmail, render_email
 from scrapeforge.digest.samples import sample_articles
 from scrapeforge.digest.sender import EmailSender, PreviewEmailSender
+
+log = logging.getLogger(__name__)
 
 
 def load_subscriber(path: Path | str) -> Subscriber:
@@ -97,3 +101,51 @@ def deliver(
     digest, email = make_digest(subscriber, source)
     (sender or PreviewEmailSender()).send(to or subscriber.email, email)
     return digest
+
+
+@dataclass(frozen=True, slots=True)
+class DeliverySummary:
+    """Outcome counts for a per-user delivery run."""
+
+    sent: int = 0
+    skipped_empty: int = 0
+    failed: int = 0
+
+    def __str__(self) -> str:
+        return f"sent={self.sent} skipped_empty={self.skipped_empty} failed={self.failed}"
+
+
+def deliver_all(*, source: str = "postgres", sender: EmailSender | None = None) -> DeliverySummary:
+    """Send each active user their own relevance-ranked digest. Per-user failures are isolated:
+    one user's bad render/send is logged and counted, never aborting the batch. Empty digests are
+    skipped (no blank email). Defaults to the preview sender (no creds)."""
+    if source != "postgres":
+        raise ValueError(f"deliver_all only supports source='postgres', got {source!r}")
+
+    from scrapeforge.config.settings import Settings
+    from scrapeforge.digest.settings import DigestSettings
+    from scrapeforge.digest.user_digest import build_user_digest
+    from scrapeforge.digest.user_source import load_all_sync
+
+    ds = DigestSettings()
+    batches = load_all_sync(
+        Settings().DATABASE_URL,
+        window_hours=ds.DIGEST_USER_WINDOW_HOURS,
+        score_floor=ds.DIGEST_USER_SCORE_FLOOR,
+        limit=ds.DIGEST_USER_TOP_N,
+    )
+    sender = sender or PreviewEmailSender()
+
+    sent = skipped = failed = 0
+    for user, articles in batches:
+        try:
+            if not articles:
+                skipped += 1
+                continue
+            digest = build_user_digest(user, articles)
+            sender.send(user.email, render_email(digest))
+            sent += 1
+        except Exception:  # noqa: BLE001 — isolate one user's failure from the rest of the batch
+            log.exception("deliver_all: delivery failed for user %s", user.user_id)
+            failed += 1
+    return DeliverySummary(sent=sent, skipped_empty=skipped, failed=failed)
