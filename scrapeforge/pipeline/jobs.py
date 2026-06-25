@@ -124,3 +124,47 @@ async def ingest_subreddits(
         failed,
     )
     return persisted
+
+
+async def ingest_news_feeds(
+    *,
+    session_factory,
+    scraper,
+    feeds,
+    limit: int,
+    min_chars: int = 200,
+) -> int:
+    """Fetch each curated news RSS feed and UPSERT its articles into Postgres (Bucket 3).
+
+    Drives the injected scraper's ``scrape_feed`` (one request per feed) and persists via the
+    idempotent ``PostgresSink``. The *min_chars* body floor is applied inside the parser
+    (``parse_news_feed``), so thin/summary-only items are dropped before they reach here. One feed's
+    failure (a moved URL, a non-XML soft-block body, a parse error) is logged and skipped so the
+    rest still ingest. Returns the number of articles persisted.
+    """
+    sink = PostgresSink(session_factory)
+    persisted = 0
+    failed = 0
+    for feed in feeds:
+        try:
+            results = await scraper.scrape_feed(feed.feed_url, limit=limit, min_chars=min_chars)
+        except Exception as exc:  # noqa: BLE001
+            # Broad on purpose: a feed can return a non-XML challenge body or a moved/404 page,
+            # raising ValueError/parse errors — not just ScrapeForgeError. Isolate per feed.
+            failed += 1
+            log.warning("ingest-news: skipping %s — fetch/parse failed: %s", feed.name, exc)
+            continue
+        for result in results:
+            if result.status != "success" or result.article is None:
+                continue
+            if sink.seen(result.article.url):
+                continue
+            await sink.write(result)
+            persisted += 1
+    log.info(
+        "ingest-news: persisted %d articles across %d feeds (%d failed)",
+        persisted,
+        len(feeds),
+        failed,
+    )
+    return persisted

@@ -113,6 +113,40 @@ def ingest_reddit_cmd(
     typer.echo(f"ingest-reddit: persisted {n} posts from {len(subreddits)} subreddit(s).")
 
 
+@pipeline_app.command("ingest-news")
+def ingest_news_cmd(
+    limit: int = typer.Option(20, "--limit", "-l", help="Max items per feed"),
+    sector: str | None = typer.Option(None, "--sector", "-s", help="Only this sector"),
+    max_feeds: int | None = typer.Option(None, "--max", "-m", help="Cap number of feeds"),
+    min_chars: int = typer.Option(200, "--min-chars", help="Drop items with a shorter body"),
+) -> None:
+    """Scrape curated public-news RSS feeds (TechCrunch, Crunchbase, …) straight into Postgres."""
+    _use_selector_loop()
+    from scrapeforge.config.settings import Settings
+    from scrapeforge.core.db.session import make_engine, make_sessionmaker
+    from scrapeforge.pipeline.jobs import ingest_news_feeds
+    from scrapeforge.scrapers.public.news_scraper import NewsScraper
+    from scrapeforge.scrapers.public.news_sources import select_feeds
+
+    feeds = select_feeds(sector=sector, limit=max_feeds)
+
+    async def _run() -> int:
+        engine = make_engine(Settings().DATABASE_URL)
+        try:
+            return await ingest_news_feeds(
+                session_factory=make_sessionmaker(engine),
+                scraper=NewsScraper(),
+                feeds=feeds,
+                limit=limit,
+                min_chars=min_chars,
+            )
+        finally:
+            await engine.dispose()
+
+    n = asyncio.run(_run())
+    typer.echo(f"ingest-news: persisted {n} articles from {len(feeds)} feed(s).")
+
+
 @pipeline_app.command("prune")
 def prune_cmd(
     days: int | None = typer.Option(None, "--days", help="Override retention window (days)."),
