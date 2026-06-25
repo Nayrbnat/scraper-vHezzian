@@ -49,6 +49,14 @@ scrapeforge/
 │   │   ├── openai_compatible.py    # OpenAICompatibleSummarizer: httpx adapter (GLM-4.5-Flash default; any OpenAI-compat base URL)
 │   │   ├── settings.py             # SummarizerSettings per-module fragment (SUMMARY_* env vars; never extends core Settings)
 │   │   └── exceptions.py          # LLMError, LLMRateLimitError, LLMParseError
+│   ├── embeddings/                 # === EMBEDDER PORT (Phase 3 multi-user relevance) ===
+│   │   ├── __init__.py
+│   │   ├── base.py                 # Embedder ABC — async embed(texts) -> list[list[float]]
+│   │   ├── gemini.py               # GeminiEmbedder (PRIMARY): Gemini :batchEmbedContents over httpx; key in x-goog-api-key header
+│   │   ├── openai_compatible.py    # OpenAICompatibleEmbedder (fallback, e.g. Jina): POST {BASE}/embeddings
+│   │   ├── factory.py              # make_embedder(settings): picks adapter by EMBED_PROVIDER
+│   │   ├── settings.py             # EmbedderSettings per-module fragment (EMBED_* env vars; EMBED_DIM=1536)
+│   │   └── exceptions.py          # EmbeddingError, EmbeddingRateLimitError, EmbeddingParseError
 │   ├── queue/                      # === MESSAGE QUEUE PORT (+ adapters) ===
 │   │   ├── base.py                 # MessageQueue ABC (publish/reserve/ack/requeue/dead_letter; consume_once)
 │   │   ├── memory.py               # InMemoryMessageQueue (fake + local single-process)
@@ -127,7 +135,9 @@ scrapeforge/
 ├── pipeline/                       # === RUN-ONCE PIPELINE JOBS (Phase 6.5 — Render Cron / Neon) ===
 │   ├── __init__.py
 │   ├── jobs.py                     # init_db(), ingest_publications(): pure-async, no Typer, injectable fakes
-│   └── cli.py                      # pipeline_app Typer sub-app (init-db / ingest / summarize); mounted by root cli.py
+│   ├── retention.py                # prune_articles(): oldest-first storage retention under the DB cap
+│   ├── embeddings_jobs.py          # Phase 3: embed_articles / embed_profiles / score_users / seed_owner (injected Embedder)
+│   └── cli.py                      # pipeline_app Typer sub-app (init-db / ingest / summarize / prune / seed-owner / embed-articles / embed-profiles / score-users); mounted by root cli.py
 │
 ├── digest/                         # === RELEVANCE DIGEST (Phase 2.5) ===
 │   ├── __init__.py
@@ -210,6 +220,13 @@ scrapeforge/
 | `core/llm/openai_compatible.py` | `OpenAICompatibleSummarizer`: httpx POST to any OpenAI-compatible endpoint; lenient JSON parse; retry on 429 | `summarize_worker.py` | **Phase 2 — keep** |
 | `core/llm/settings.py` | `SummarizerSettings`: per-module `BaseSettings` fragment reading `SUMMARY_*` env vars; `portfolio()` / `interests()` CSV helpers | `run_summarize.py` | **Phase 2 — keep** |
 | `core/llm/exceptions.py` | `LLMError`, `LLMRateLimitError`, `LLMParseError` — subclass `ScrapeForgeError`; never edit `exceptions.py` | `openai_compatible.py`, worker | **Phase 2 — keep** |
+| `core/embeddings/base.py` | `Embedder` ABC — `async embed(texts) -> list[list[float]]` | `embeddings_jobs.py`, tests | **Phase 3 — keep** |
+| `core/embeddings/gemini.py` | `GeminiEmbedder` (primary): Gemini `:batchEmbedContents` over httpx; key in `x-goog-api-key` header | `factory.py` | **Phase 3 — keep** |
+| `core/embeddings/openai_compatible.py` | `OpenAICompatibleEmbedder` (Jina fallback): POST `{BASE}/embeddings` | `factory.py` | **Phase 3 — keep** |
+| `core/embeddings/factory.py` | `make_embedder(settings)`: picks adapter by `EMBED_PROVIDER` | `pipeline/cli.py` | **Phase 3 — keep** |
+| `core/embeddings/settings.py` | `EmbedderSettings` per-module fragment (`EMBED_*`; `EMBED_DIM=1536`) | `pipeline/cli.py`, jobs | **Phase 3 — keep** |
+| `core/embeddings/exceptions.py` | `EmbeddingError`, `EmbeddingRateLimitError`, `EmbeddingParseError` — subclass `ScrapeForgeError` | adapters, jobs | **Phase 3 — keep** |
+| `pipeline/embeddings_jobs.py` | Phase 3 jobs: `embed_articles` (WHERE embedding NULL) / `embed_profiles` (hash-gated) / `score_users` (pgvector cosine top-K) / `seed_owner`; inlined ORM, no raw SQL | Postgres, `core/embeddings/` | **Phase 3 — keep** |
 | `worker/summarize_worker.py` | Phase 2 batch worker: `SELECT WHERE summary IS NULL` → LLM call → `UPDATE relevance+summary`; rate-limit stops run; parse errors skip row | Postgres, `core/llm/` | **Phase 2 — keep** |
 | `worker/run_summarize.py` | Deployment entry point for summarizer poll loop (`python -m scrapeforge.worker.run_summarize`); calls migrations at startup | ops | **Phase 2 — keep** |
 | `digest/models.py` | `DigestItem` (+ `bullets`/`relevance`/`reason` fields), `DigestSection` (key extended to include `"top"`), `Digest` | `renderer.py`, `relevance.py`, CLI | **Phase 2.5 — keep** |

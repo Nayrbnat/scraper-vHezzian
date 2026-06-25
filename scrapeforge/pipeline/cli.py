@@ -160,3 +160,118 @@ def summarize_cmd(
             await engine.dispose()
 
     asyncio.run(_run())
+
+
+@pipeline_app.command("seed-owner")
+def seed_owner_cmd() -> None:
+    """Upsert the owner profile from SUMMARY_PORTFOLIO/INTERESTS/FOCUS (no API key needed)."""
+    _use_selector_loop()
+    from scrapeforge.config.settings import Settings
+    from scrapeforge.core.db.session import make_engine, make_sessionmaker
+    from scrapeforge.core.llm.settings import SummarizerSettings
+    from scrapeforge.pipeline.embeddings_jobs import seed_owner
+
+    async def _run() -> None:
+        engine = make_engine(Settings().DATABASE_URL)
+        try:
+            await seed_owner(
+                session_factory=make_sessionmaker(engine), settings=SummarizerSettings()
+            )
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_run())
+    typer.echo("seed-owner: owner profile upserted.")
+
+
+def _embedder_or_skip(action: str):
+    """Build the configured embedder, or return (None, None) and echo a skip if no key is set."""
+    import logging
+
+    from scrapeforge.core.embeddings.factory import make_embedder
+    from scrapeforge.core.embeddings.settings import EmbedderSettings
+
+    settings = EmbedderSettings()
+    if not settings.EMBED_API_KEY:
+        logging.getLogger(__name__).warning("EMBED_API_KEY empty — %s skipped.", action)
+        typer.echo(f"{action}: skipped (no EMBED_API_KEY).")
+        return None, None
+    return make_embedder(settings), settings
+
+
+@pipeline_app.command("embed-articles")
+def embed_articles_cmd() -> None:
+    """Embed articles WHERE embedding IS NULL (idempotent). Skips if no EMBED_API_KEY."""
+    _use_selector_loop()
+    embedder, settings = _embedder_or_skip("embed-articles")
+    if embedder is None:
+        return
+
+    from scrapeforge.config.settings import Settings
+    from scrapeforge.core.db.session import make_engine, make_sessionmaker
+    from scrapeforge.pipeline.embeddings_jobs import embed_articles
+
+    async def _run() -> int:
+        engine = make_engine(Settings().DATABASE_URL)
+        try:
+            return await embed_articles(
+                session_factory=make_sessionmaker(engine),
+                embedder=embedder,
+                batch_size=settings.EMBED_BATCH_SIZE,
+            )
+        finally:
+            await engine.dispose()
+
+    n = asyncio.run(_run())
+    typer.echo(f"embed-articles: embedded {n} article(s).")
+
+
+@pipeline_app.command("embed-profiles")
+def embed_profiles_cmd() -> None:
+    """Embed changed user profiles (source-hash gate). Skips if no EMBED_API_KEY."""
+    _use_selector_loop()
+    embedder, _settings = _embedder_or_skip("embed-profiles")
+    if embedder is None:
+        return
+
+    from scrapeforge.config.settings import Settings
+    from scrapeforge.core.db.session import make_engine, make_sessionmaker
+    from scrapeforge.pipeline.embeddings_jobs import embed_profiles
+
+    async def _run() -> int:
+        engine = make_engine(Settings().DATABASE_URL)
+        try:
+            return await embed_profiles(
+                session_factory=make_sessionmaker(engine), embedder=embedder
+            )
+        finally:
+            await engine.dispose()
+
+    n = asyncio.run(_run())
+    typer.echo(f"embed-profiles: (re-)embedded {n} profile(s).")
+
+
+@pipeline_app.command("score-users")
+def score_users_cmd() -> None:
+    """Score recent articles per user via pgvector cosine similarity (no API key needed)."""
+    _use_selector_loop()
+    from scrapeforge.config.settings import Settings
+    from scrapeforge.core.db.session import make_engine, make_sessionmaker
+    from scrapeforge.core.embeddings.settings import EmbedderSettings
+    from scrapeforge.pipeline.embeddings_jobs import score_users
+
+    settings = EmbedderSettings()
+
+    async def _run() -> int:
+        engine = make_engine(Settings().DATABASE_URL)
+        try:
+            return await score_users(
+                session_factory=make_sessionmaker(engine),
+                window_days=settings.EMBED_SCORE_WINDOW_DAYS,
+                top_k=settings.EMBED_TOP_K,
+            )
+        finally:
+            await engine.dispose()
+
+    n = asyncio.run(_run())
+    typer.echo(f"score-users: wrote {n} (user, article) score(s).")

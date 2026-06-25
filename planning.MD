@@ -306,6 +306,35 @@ Only after this passes do we build the full proxy/humanize/escalation stack agai
 
 ---
 
+### Multi-user Per-User Relevance — Phase 3
+
+> ✅ **DELIVERED** (branch `feat/multiuser-relevance`). Per-user article ranking via embeddings +
+> pgvector cosine similarity over the SHARED corpus — no per-user LLM call (Invariant #19). The
+> Hezzian app owns/writes `user_profiles`; the pipeline only reads it and writes per-user scores.
+>
+> - **`core/embeddings/`** — `Embedder` port (`base.py`) + `GeminiEmbedder` (primary,
+>   `gemini-embedding-001`, 1536-dim, key in `x-goog-api-key` header) + `OpenAICompatibleEmbedder`
+>   (Jina fallback) + `make_embedder` factory + `EmbedderSettings` (`EMBED_*`) + typed exceptions.
+> - **Schema (`core/db/models.py`)** — `user_profiles` (app-owned), `user_profile_vectors`,
+>   `user_article_relevance` (FK→`articles.id` ON DELETE CASCADE, indexed `(user_id, score)`);
+>   `articles.embedding Vector(1536)` reused. Created idempotently by `init-db`'s `create_all`.
+> - **`pipeline/embeddings_jobs.py`** — `embed_articles` (WHERE embedding NULL), `embed_profiles`
+>   (sha256 source-hash gate → skip unchanged), `score_users` (ORM `cosine_distance` top-K,
+>   `score = 1 - distance`, no raw SQL), `seed_owner` (owner profile from `SUMMARY_*`).
+> - **`pipeline/cli.py`** — `seed-owner` / `embed-articles` / `embed-profiles` / `score-users`;
+>   embed commands idle-skip when `EMBED_API_KEY` is empty.
+> - **`daily-pipeline.yml`** — four steps wired after `summarize`, before `prune`. New deploy
+>   secret: **`EMBED_API_KEY`** (free Google AI Studio key) — until set, embed steps idle, pipeline
+>   stays green.
+> - **Cost:** $0 — embeddings on Gemini's free tier; scoring is pure in-database vector math.
+> - **Invariant #16/#17/#19 compliance:** new files + named additive edits only (`models.py`,
+>   `cli.py`, `daily-pipeline.yml`, docs); no edits to `engine.py`/`registry.py`/`repositories.py`/
+>   core `Settings`/existing workers.
+>
+> **Out of scope (later):** login/feed UI, swipe feedback loop, per-user email delivery.
+
+---
+
 ## 4. Phase 4: Bucket 1 — Premium News Paywalls
 **Goal:** The hardest bucket. Bloomberg, FT, WSJ, Economist.
 **Duration:** 5–7 days  
@@ -659,6 +688,7 @@ auth/StateStore (Phase 4) for gated sources; embeddings (Phase 8) for semantic r
 | Phase 3.6: Community ingestion Phase 1 | ✅ delivered | — | Lean scheduled ingestion of 50 curated Substacks → Postgres via INGEST queue; next: AI summaries → ranking → brief UI |
 | AI Summaries + Relevance (Phase 2) | ✅ delivered | — | `core/llm/` port + GLM-4.5-Flash adapter; `relevance` INT + `summary` JSONB columns; batch summarize worker; idempotent migrations |
 | Relevance Digest (Phase 2.5) | ✅ delivered | — | `digest/relevance.py` + `postgres_source.py` + `settings.py`; `DigestItem` bullets/relevance/reason; renderer badge+bullets path; `DIGEST_SOURCE` workflow variable; next: Phase 4 swipe UI |
+| Multi-user Relevance (Phase 3) | ✅ delivered | — | `core/embeddings/` Embedder port (Gemini + Jina) + `pipeline/embeddings_jobs.py` (embed-articles/embed-profiles/score-users/seed-owner) + 3 contract tables (pgvector cosine, no per-user LLM); deploy secret `EMBED_API_KEY`; next: Phase 4 swipe UI / feed |
 | **Live deployment — Render + Neon (Phase 6.5)** | **🔄 ACTIVE** | — | `pipeline/` sub-app (`init-db`/`ingest`/`summarize`); lean run-once Render Cron Jobs backed by Neon Postgres; `DATABASE_SSL` opt-in TLS; SQLi-audit guard (`tests/test_no_raw_sql.py`). Swipe app (Phase 9) and protected buckets deferred. |
 | Phase 4: Bucket 1 | 5–7 days | Day 19 | Premium paywall scraper, auth system |
 | Phase 5: Integration | 3–4 days | Day 23 | Engine, docs, performance, final QA |
