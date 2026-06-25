@@ -81,6 +81,11 @@ jobs:
         # Reddit soft-blocks datacenter IPs — a failed subreddit is skipped, the rest still ingest.
         run: python -m scrapeforge pipeline ingest-reddit --limit 20
 
+      - name: Ingest curated public-news RSS (TechCrunch, Crunchbase, …) into Neon
+        # RSS feeds carry recent items with bodies inline; dedup means re-runs only add new posts.
+        # A moved/blocked feed is skipped, the rest still ingest.
+        run: python -m scrapeforge pipeline ingest-news --limit 20
+
       - name: Summarize + score the new articles
         # Normal scheduled run drains un-summarized rows. A manual dispatch with
         # summarize_refresh=N re-summarizes the N most recent rows (applies a new prompt/focus).
