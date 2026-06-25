@@ -183,6 +183,10 @@ class UserProfile(Base):
     focus: Mapped[str | None]
     """Optional free-text emphasis (defaults to the global SUMMARY_FOCUS when unset)."""
 
+    email: Mapped[str | None]
+    """User's email address — the Hezzian app writes this from Clerk at signup.
+    NULL means the user has no email on file and is skipped at send time."""
+
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     """Timezone-aware UTC timestamp of the last profile write."""
 
