@@ -22,12 +22,15 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 
+import httpx
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from scrapeforge.core.models import Article, ScrapeResult
 from scrapeforge.core.registry import register_scraper
+from scrapeforge.exceptions import DriverError
 from scrapeforge.scrapers.community._base import CommunityScraper
+from scrapeforge.scrapers.community.reddit_auth import RedditAuth
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +50,15 @@ class RedditSettings(BaseSettings):
 
     REDDIT_USE_JSON_API: bool = Field(default=True)
     REDDIT_JSON_LIMIT: int = Field(default=100)
+    # --- OAuth (Reddit blocks the anonymous .json endpoint; oauth.reddit.com needs a token) ---
+    REDDIT_CLIENT_ID: str = Field(default="")  # from https://www.reddit.com/prefs/apps
+    REDDIT_CLIENT_SECRET: str = Field(default="")  # secret; .env only
+    REDDIT_USER_AGENT: str = Field(default="scrapeforge/0.1 (investing news aggregator)")
+    REDDIT_REQUEST_TIMEOUT: float = Field(default=30.0)
+
+    def oauth_enabled(self) -> bool:
+        """True when both OAuth credentials are present → use authenticated oauth.reddit.com."""
+        return bool(self.REDDIT_CLIENT_ID and self.REDDIT_CLIENT_SECRET)
 
 
 # ---------------------------------------------------------------------------
@@ -54,6 +66,7 @@ class RedditSettings(BaseSettings):
 # ---------------------------------------------------------------------------
 
 _BASE_URL = "https://www.reddit.com"
+_OAUTH_BASE = "https://oauth.reddit.com"
 
 
 @register_scraper("reddit.com", "www.reddit.com")
@@ -71,6 +84,57 @@ class RedditScraper(CommunityScraper):
 
     DOMAINS: list[str] = ["reddit.com", "www.reddit.com"]
     DEFAULT_DRIVER: str = "curl_cffi"
+
+    def __init__(
+        self,
+        bridge=None,  # noqa: ANN001
+        proxy: str | None = None,
+        max_concurrency: int = 5,
+        auth: RedditAuth | None = None,
+    ) -> None:
+        """Build the scraper. When ``REDDIT_CLIENT_ID``/``REDDIT_CLIENT_SECRET`` are set (or *auth*
+        is injected), authenticated ``oauth.reddit.com`` is used; otherwise the legacy anonymous
+        ``.json`` path (now 403-blocked by Reddit) — kept only for back-compat / injected-bridge
+        tests."""
+        super().__init__(bridge=bridge, proxy=proxy, max_concurrency=max_concurrency)
+        settings = RedditSettings()
+        self._user_agent = settings.REDDIT_USER_AGENT
+        self._request_timeout = settings.REDDIT_REQUEST_TIMEOUT
+        if auth is not None:
+            self._auth: RedditAuth | None = auth
+        elif settings.oauth_enabled():
+            self._auth = RedditAuth(
+                client_id=settings.REDDIT_CLIENT_ID,
+                client_secret=settings.REDDIT_CLIENT_SECRET,
+                user_agent=settings.REDDIT_USER_AGENT,
+                timeout=settings.REDDIT_REQUEST_TIMEOUT,
+            )
+        else:
+            self._auth = None
+
+    async def _fetch_listing(self, path: str) -> dict | list:
+        """Fetch a Reddit listing JSON for *path* (e.g. ``r/investing/hot.json?limit=5``).
+
+        Authenticated ``oauth.reddit.com`` (Bearer + descriptive UA) when OAuth is configured;
+        otherwise the legacy anonymous ``www.reddit.com`` ``.json`` path via the bridge.
+
+        Note: ``oauth.reddit.com`` returns JSON natively and does NOT use the ``.json`` suffix (a
+        www.reddit.com convention), so it is stripped on the OAuth branch. These direct httpx GETs
+        bypass the engine RateLimiter; app-only OAuth allows ~100 QPM and the daily ingest fetches a
+        single page per subreddit (limit ≤ 100), so it stays well within budget.
+        """
+        if self._auth is None:
+            return await self._fetch_json(f"{_BASE_URL}/{path}")
+        token = await self._auth.token()
+        oauth_path = path.replace(".json?", "?", 1).removesuffix(".json")  # bare path for oauth.*
+        async with httpx.AsyncClient(timeout=self._request_timeout) as client:
+            resp = await client.get(
+                f"{_OAUTH_BASE}/{oauth_path}",
+                headers={"Authorization": f"Bearer {token}", "User-Agent": self._user_agent},
+            )
+        if resp.status_code != 200:
+            raise DriverError(f"Reddit OAuth GET /{path} -> HTTP {resp.status_code}")
+        return resp.json()
 
     # ------------------------------------------------------------------
     # Field mapping (playbook §2.2)
@@ -165,11 +229,11 @@ class RedditScraper(CommunityScraper):
 
         while len(results) < limit:
             page_size = min(100, limit - len(results))
-            url = f"{_BASE_URL}/r/{subreddit}/{sort}.json?limit={page_size}&count={count}"
+            path = f"r/{subreddit}/{sort}.json?limit={page_size}&count={count}"
             if after:
-                url += f"&after={after}"
+                path += f"&after={after}"
 
-            payload = await self._fetch_json(url)
+            payload = await self._fetch_listing(path)
             # The listing endpoint returns a single Listing object.
             listing_data: dict = payload["data"]  # type: ignore[index]
             children: list[dict] = listing_data.get("children", [])
@@ -215,6 +279,10 @@ class RedditScraper(CommunityScraper):
 
     async def scrape(self, url: str) -> ScrapeResult:
         """Scrape a single Reddit post URL.
+
+        NOTE: this single-post path is NOT yet OAuth-routed — it still uses the legacy anonymous
+        ``.json`` endpoint (now 403-blocked). The daily ingest uses :meth:`scrape_subreddit`
+        (which IS OAuth-routed); single-post OAuth is a follow-up if the engine routes URLs here.
 
         The ``.json`` endpoint for a post returns a **2-element array**:
         ``[post_listing, comments_listing]`` (playbook §1.2, §2.4).
