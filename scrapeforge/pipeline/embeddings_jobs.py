@@ -7,6 +7,7 @@ here (not added to ``repositories.py``) per the seam rules. No raw SQL.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 from datetime import UTC, datetime, timedelta
@@ -17,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from scrapeforge.core.db.models import Article, UserArticleRelevance, UserProfile, UserProfileVector
 from scrapeforge.core.embeddings.base import Embedder
+from scrapeforge.core.embeddings.exceptions import EmbeddingRateLimitError
 
 log = logging.getLogger(__name__)
 
@@ -55,6 +57,44 @@ async def embed_articles(
         await session.commit()
     log.info("embed_articles: embedded %d article(s)", updated)
     return updated
+
+
+async def embed_articles_batched(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    embedder: Embedder,
+    batch_size: int,
+    max_batches: int,
+    pause_seconds: float,
+) -> int:
+    """Drain NULL-embedding articles over up to *max_batches* small batches, one run.
+
+    Calls :func:`embed_articles` repeatedly (each handles ``batch_size`` rows), pausing
+    *pause_seconds* between batches to respect the provider's rate limit. Stops early when a batch
+    returns 0 (backlog drained) or when the provider rate-limits — the latter is logged and
+    swallowed so the cron step stays green; the next run resumes the remaining rows. Returns the
+    total embedded this run.
+    """
+    total = 0
+    for i in range(max_batches):
+        try:
+            n = await embed_articles(
+                session_factory=session_factory, embedder=embedder, batch_size=batch_size
+            )
+        except EmbeddingRateLimitError:
+            log.warning(
+                "embed_articles_batched: rate-limited after %d embedded; stopping this run "
+                "(the next run resumes the remaining rows).",
+                total,
+            )
+            break
+        if n == 0:
+            break  # no more NULL-embedding rows
+        total += n
+        if i < max_batches - 1:
+            await asyncio.sleep(pause_seconds)
+    log.info("embed_articles_batched: embedded %d article(s) this run", total)
+    return total
 
 
 def _profile_text(portfolio: list[str], sectors: list[str], focus: str | None) -> str:
