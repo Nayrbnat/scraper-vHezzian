@@ -271,7 +271,11 @@ def _embedder_or_skip(action: str):
 
 @pipeline_app.command("embed-articles")
 def embed_articles_cmd() -> None:
-    """Embed articles WHERE embedding IS NULL (idempotent). Skips if no EMBED_API_KEY."""
+    """Embed articles WHERE embedding IS NULL (idempotent). Skips if no EMBED_API_KEY.
+
+    Drains up to EMBED_MAX_BATCHES batches of EMBED_BATCH_SIZE per run, pacing between them and
+    stopping gracefully if the provider rate-limits (the next run resumes the rest).
+    """
     _use_selector_loop()
     embedder, settings = _embedder_or_skip("embed-articles")
     if embedder is None:
@@ -279,15 +283,17 @@ def embed_articles_cmd() -> None:
 
     from scrapeforge.config.settings import Settings
     from scrapeforge.core.db.session import make_engine, make_sessionmaker
-    from scrapeforge.pipeline.embeddings_jobs import embed_articles
+    from scrapeforge.pipeline.embeddings_jobs import embed_articles_batched
 
     async def _run() -> int:
         engine = make_engine(Settings().DATABASE_URL)
         try:
-            return await embed_articles(
+            return await embed_articles_batched(
                 session_factory=make_sessionmaker(engine),
                 embedder=embedder,
                 batch_size=settings.EMBED_BATCH_SIZE,
+                max_batches=settings.EMBED_MAX_BATCHES,
+                pause_seconds=settings.EMBED_BATCH_PAUSE_SECONDS,
             )
         finally:
             await engine.dispose()
