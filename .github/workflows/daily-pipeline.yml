@@ -45,6 +45,10 @@ jobs:
       EMBED_MODEL: ${{ vars.EMBED_MODEL || 'gemini-embedding-001' }}
       # --- user sync (Phase 3.6): read-only connection to the hezzian app DB ---
       HEZZIAN_DATABASE_URL: ${{ secrets.HEZZIAN_DATABASE_URL }}
+      # --- Reddit OAuth: anonymous .json is 403-blocked; oauth.reddit.com needs a token ---
+      REDDIT_CLIENT_ID: ${{ secrets.REDDIT_CLIENT_ID }}
+      REDDIT_CLIENT_SECRET: ${{ secrets.REDDIT_CLIENT_SECRET }}
+      REDDIT_USER_AGENT: ${{ vars.REDDIT_USER_AGENT || 'scrapeforge/0.1 (investing news aggregator)' }}
       # --- non-secrets ---
       DATABASE_SSL: require # asyncpg uses TLS to reach Neon
       SUMMARY_MODEL: ${{ vars.SUMMARY_MODEL || 'glm-4.5-flash' }}
